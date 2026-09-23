@@ -38,14 +38,14 @@ st.html(f"""<style>
     div[data-testid="stMetric"] {{
         background: {NAVY_LIGHT};
         border: 1px solid rgba(212,175,55,0.30);
-        border-radius: 14px;
-        padding: 20px 22px;
-        margin-bottom: 12px;
-        box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+        border-radius: 10px;
+        padding: 10px 14px;
+        margin-bottom: 6px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.20);
     }}
-    div[data-testid="stMetricLabel"] p {{ font-size: 0.95rem; color: {MUTED}; }}
-    div[data-testid="stMetricValue"] {{ font-size: 1.75rem; font-weight: 600; color: {TEXT}; padding: 6px 0; }}
-    div[data-testid="stMetricDelta"] {{ font-size: 0.92rem; }}
+    div[data-testid="stMetricLabel"] p {{ font-size: 0.8rem; color: {MUTED}; }}
+    div[data-testid="stMetricValue"] {{ font-size: 1.25rem; font-weight: 600; color: {TEXT}; padding: 2px 0; }}
+    div[data-testid="stMetricDelta"] {{ font-size: 0.78rem; }}
 
     /* 分頁樣式 */
     .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
@@ -1186,7 +1186,7 @@ try:
                                      line=dict(color=GOLD, width=2, dash="dash")))
             st.plotly_chart(style_fig(fan, 420), use_container_width=True)
 
-        sup_col, res_col, pe_col = st.columns(3, gap="large")
+        sup_col, res_col, pe_col = st.columns(3, gap="small")
         with sup_col:
             st.markdown("**🟢 技術面支撐**")
             for v, k in supports:
@@ -1210,7 +1210,7 @@ try:
 
     # ── 總覽 ──
     with tab_overview:
-        col1, col2, col3 = st.columns(3, gap="large")
+        col1, col2, col3 = st.columns(3, gap="small")
         with col1:
             st.metric(label=f"當前股價 ({stock_name})", value=f"{current_price:.2f} 元", delta=f"{price_change:+.2f} ({price_pct:+.2f}%)")
         with col2:
@@ -1234,7 +1234,7 @@ try:
         if not own_val:
             st.caption("此標的沒有官方本益比資料（ETF 不適用本益比評估）。")
         else:
-            v1, v2, v3 = st.columns(3, gap="large")
+            v1, v2, v3 = st.columns(3, gap="small")
             with v1:
                 if np.isnan(current_pe):
                     st.metric("本益比 (PER)", "—", delta="近四季虧損", delta_color="off")
@@ -1287,7 +1287,7 @@ try:
                 st.caption("暫時抓不到此 ETF 的持股明細。")
             else:
                 st.caption(f"持股資料日期 {etf_date}（投信每月公布），共 {len(etf_holdings)} 檔成分股。「持股增減」為與上期相比的持股股數變化。")
-                e1, e2, e3 = st.columns(3, gap="large")
+                e1, e2, e3 = st.columns(3, gap="small")
                 e1.metric("前十大權重合計", f"{etf_top['權重 (%)'].sum():.1f}%",
                           delta=f"最大 {etf_top.iloc[0]['成分股']} {etf_top.iloc[0]['權重 (%)']:.1f}%", delta_color="off")
                 e2.metric("前十大近一月加權貢獻", f"{contrib:+.2f} 個百分點")
@@ -1318,7 +1318,7 @@ try:
 
     # ── 技術分析 ──
     with tab_tech:
-        c1, c2, c3 = st.columns(3, gap="large")
+        c1, c2, c3 = st.columns(3, gap="small")
         with c1:
             st.metric("RSI (14)", f"{current_rsi:.1f}", delta=rsi_text, delta_color=rsi_color)
         with c2:
