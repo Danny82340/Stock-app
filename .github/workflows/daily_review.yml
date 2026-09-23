@@ -23,6 +23,13 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: 每週一重跑 20 年回測，重新校準 1 週 / 1 個月 / 1 年模型
+        run: |
+          if [ "$(TZ=Asia/Taipei date +%u)" = "1" ] || [ ! -f data/horizon_model.json ]; then
+            python backtest.py --workers 4
+          else
+            echo "今天不是週一，沿用上週校準的模型"
+          fi
       - name: 驗證、校準、預測、產生檢討報告
         run: python daily_review.py
         env:

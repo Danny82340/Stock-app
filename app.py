@@ -192,7 +192,12 @@ if "watchlist" not in st.session_state:
 WATCH = st.session_state.watchlist
 DEFAULT_STOCKS = {code: name for pool in STOCK_POOL.values() for code, name in pool.items()}
 STOCK_POOL = {cat: {c: n for c, n in pool.items() if c not in WATCH["hidden"]} for cat, pool in STOCK_POOL.items()}
-for code, name in WATCH["custom"].items():  # 新增的股票依產業自動分類
+for code, name in list(WATCH["custom"].items()):  # 新增的股票依產業自動分類
+    if not name or name == code or name == code.split(".")[0]:  # 手動加入時沒填名稱 → 自動查中文名並存檔
+        name = lookup_stock_name(code) or code
+        if name != code:
+            WATCH["custom"][code] = name
+            save_watchlist(WATCH)
     STOCK_POOL.setdefault(classify(code), {})[code] = name
 ALL_STOCKS = {code: name for pool in STOCK_POOL.values() for code, name in pool.items()}
 CODE_TO_CATEGORY = {code: cat for cat, pool in STOCK_POOL.items() for code in pool}
@@ -203,7 +208,7 @@ def add_to_watchlist():
     manual = st.session_state.get("add_manual", "").strip().upper()
     if manual:
         code = manual if "." in manual else manual + st.session_state.get("add_board", ".TW")
-        codes.append((code, st.session_state.get("add_manual_name", "").strip() or code))
+        codes.append((code, st.session_state.get("add_manual_name", "").strip() or lookup_stock_name(code) or code))
     for code, name in codes:
         if code in DEFAULT_STOCKS:  # 之前移除的預設股票 → 回到原本類別
             if code in WATCH["hidden"]:
@@ -311,7 +316,7 @@ with st.sidebar.expander("➕ 新增股票", expanded=True):
     else:
         st.caption("⚠️ 無法取得全市場清單，請手動輸入代號。")
     st.text_input("或手動輸入代號", key="add_manual", placeholder="例如：2454")
-    st.text_input("股票名稱 (選填)", key="add_manual_name", placeholder="例如：聯發科")
+    st.text_input("股票名稱 (選填，留空會自動查詢)", key="add_manual_name", placeholder="例如：聯發科")
     st.radio("市場", [".TW", ".TWO"], key="add_board", horizontal=True,
              format_func=lambda s: "上市 (.TW)" if s == ".TW" else "上櫃 (.TWO)")
     st.caption("新增後會依證交所 / 櫃買中心的產業別自動歸類（例如聯發科 → 半導體類、ETF → 大盤市值與高股息）。")
@@ -1197,6 +1202,18 @@ try:
     # ── 每日檢討 (GitHub Actions 每個交易日早上自動執行 daily_review.py，結果存在 data/) ──
     with tab_review:
         st.subheader("📝 每日檢討與模型自我校準")
+        horizon_info = load_horizon_model()
+        if horizon_info:
+            st.markdown("**📊 20 年回測校準結果（每週一自動重跑）**")
+            st.dataframe(pd.DataFrame([
+                {"期間": h, "採用": "✅ 回測校準模型" if hm["mode"] == "model" else "⛔ 無預測力，改用歷史上漲比例",
+                 "驗證期（2016 起）命中率": f"{hm['test_hit'] * 100:.1f}%", "永遠猜漲": f"{hm['test_always_up'] * 100:.1f}%",
+                 "Brier（模型 / 歷史比例）": f"{hm['test_brier']:.4f} / {hm['test_brier_base']:.4f}"}
+                for h, hm in horizon_info.items()]), width="stretch", hide_index=True)
+        bt_report = DATA_DIR / "backtest" / "report.md"
+        if bt_report.exists():
+            with st.expander("📄 完整 20 年回測報告"):
+                st.markdown(bt_report.read_text(encoding="utf-8"))
         review_dir = DATA_DIR / "reviews"
         reviews = sorted(review_dir.glob("*.md"), reverse=True) if review_dir.exists() else []
         if not reviews:

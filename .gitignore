@@ -1,0 +1,3 @@
+# 回測原始樣本很大 (約 8 MB)，每週重新產生，不需要進版控
+data/backtest/samples.csv
+__pycache__/

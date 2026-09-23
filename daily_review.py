@@ -346,7 +346,12 @@ def build_review(today, preds, weights, today_preds):
         old_w = prev_w.get(k, 1.0)
         change = f"{old_w:.2f} → **{s['weight']:.2f}**" if abs(old_w - s["weight"]) >= 0.01 else f"{s['weight']:.2f}"
         lines.append(f"| {WEEK_FACTOR_LABELS[k]} | {pct(s['acc'])} | {s['n']} | {change} |")
-    lines += ["", "> 1 個月與 1 年的判斷驗證週期長，先累積紀錄（month_p / year_p），資料足夠後再納入校準。", ""]
+    lines += ["", "### 1 週 / 1 個月 / 1 年模型（每週一以 20 年回測重新校準）", "",
+              "| 期間 | 採用 | 驗證期命中率 | 永遠猜漲 | 驗證期 Brier（模型 / 歷史比例） |", "|---|---|---|---|---|"]
+    for h, hm in M.load_horizon_model().items():
+        lines.append(f"| {h} | {'✅ 回測校準模型' if hm['mode'] == 'model' else '⛔ 模型無預測力，改用歷史上漲比例'} | "
+                     f"{pct(hm['test_hit'])} | {pct(hm['test_always_up'])} | {hm['test_brier']:.4f} / {hm['test_brier_base']:.4f} |")
+    lines += ["", "> 1 週因子另外以實盤 5 日報酬每日微調；1 個月與 1 年的實盤紀錄（month_p / year_p）持續累積，供每週回測比對。", ""]
 
     # 6. 今日預測
     lines += ["## 6. 今日預測（台股開盤前，模型量化判斷）", "",

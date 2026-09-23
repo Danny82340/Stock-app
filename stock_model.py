@@ -117,6 +117,17 @@ def load_company_names():
     return names
 
 
+def lookup_stock_name(code):
+    """由代號查中文簡稱 (官方行情 → 公司基本資料)，查不到回傳 None"""
+    q = load_official_quotes().get(code)
+    if q and q.get("name"):
+        return q["name"]
+    for name, c in load_company_names().items():
+        if c == code:
+            return name
+    return None
+
+
 def industry_of(code):
     if code.split('.')[0].startswith("00"):
         return "ETF"
@@ -929,6 +940,14 @@ FACTOR_LABELS = {
 }
 
 
+def load_horizon_model():
+    """20 年回測校準的 1 週 / 1 個月 / 1 年模型 (backtest.py 產生 data/horizon_model.json)"""
+    try:
+        return json.loads((DATA_DIR / "horizon_model.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def load_model_weights():
     """讀取每日檢討校準後的權重 (data/weights.json)；沒有檔案時全部用預設 1.0"""
     try:
@@ -1176,6 +1195,9 @@ def collect_model_inputs(code, name, d, adj, projection, nextday_p, nextday_poin
            "is_etf": stock_no.startswith("00")}
     inp["sigma_1d"] = float(np.log(adj).diff().iloc[-60:].std()) if len(adj) > 60 else 0.02
     inp["stat"] = {r["期間"]: float(r["上漲機率 (%)"]) for _, r in projection.iterrows()} if not projection.empty else {}
+    # 該股歷史上漲比例 (持有 N 天後上漲的比例)：模型沒有預測力的期間用這個當估計
+    inp["base_rates"] = {h: float(((adj.shift(-n) / adj - 1).dropna() > 0).mean())
+                         for h, n in HORIZON_DAYS.items() if len(adj) > n + 250}
     # 技術面
     ma20 = float(d["Close"].rolling(20).mean().iloc[-1])
     ma120 = float(d["Close"].rolling(120).mean().iloc[-1]) if len(d) >= 120 else np.nan
@@ -1368,20 +1390,58 @@ def build_horizon_scorecards(inp):
         add("1 年", key, label, theory, data, pts)
         add("1 個月", key, label, theory + "（中期影響較小，半權重）", data, pts * 0.5)
 
+    # ── 依 20 年回測校準 (data/horizon_model.json)：通過樣本外驗證的期間用邏輯迴歸係數；
+    #    沒通過的期間改用該股歷史上漲比例 (模型無預測力時，最誠實的估計) ──
+    horizon_model = load_horizon_model()
+    base_label = {}
+    for h in HORIZON_DAYS:
+        hm = horizon_model.get(h)
+        if h == "隔天" or not hm:
+            continue
+        rows = cards[h]
+        if hm["mode"] == "base_rate":
+            br = inp.get("base_rates", {}).get(h)
+            inp["stat"][h] = br * 100 if br is not None else inp["stat"].get(h, 50.0)
+            base_label[h] = (f"歷史上漲比例（此期間模型經 20 年回測無預測力，驗證期命中率 {hm['test_hit'] * 100:.1f}% "
+                             f"< 永遠猜漲 {hm['test_always_up'] * 100:.1f}%）")
+            for r in rows:
+                r["加減分"], r["判讀"] = 0.0, "回測無效，不計分"
+                r["驗證"] = "⛔ 回測無效"
+            continue
+        coef = hm["coef"]
+        terms = {}
+        for r in rows:
+            if r["key"] in coef:
+                terms[id(r)] = coef[r["key"]] * r["raw"] / 10
+                r["驗證"] = "✅ 回測權重"
+            else:  # 回測沒有長期資料的因子 (法人、營收…)：換算成邏輯值後半權重
+                terms[id(r)] = r["raw"] / 25 * 0.5
+                r["驗證"] = "⚠️ 未回測（半權重）"
+        z0 = hm["intercept"] + coef.get("stat", 0) * float(np.log(np.clip(inp["stat"].get(h, 50) / 100, 0.05, 0.95)
+                                                                  / (1 - np.clip(inp["stat"].get(h, 50) / 100, 0.05, 0.95))))
+        z = z0 + sum(terms.values())
+        sig = lambda x: 1 / (1 + np.exp(-x))
+        for r in rows:  # 每個因子的貢獻 = 有它與沒有它的機率差
+            r["加減分"] = round(float((sig(z) - sig(z - terms[id(r)])) * 100), 1)
+            r["判讀"] = "偏多" if r["加減分"] > 0.5 else "偏空" if r["加減分"] < -0.5 else "中性"
+        inp["stat"][h] = float(sig(z0) * 100)
+        base_label[h] = (f"回測校準基礎（相似情境統計經 20 年回測校準；驗證期命中率 {hm['test_hit'] * 100:.1f}%，"
+                         f"永遠猜漲 {hm['test_always_up'] * 100:.1f}%）")
+
     # ── 彙總：機率 → 方向 / 預估價 / 信心 ──
     result = {}
     for h, days in HORIZON_DAYS.items():
         rows = cards[h]
         base = inp["stat"].get(h, 50.0)
         total = sum(r["加減分"] for r in rows)
-        prob = float(np.clip(base + total, 10, 90))
+        prob = float(np.clip(base + total, 5, 95))
         sigma = inp["sigma_1d"] * np.sqrt(days)
         mu = sigma * NormalDist().inv_cdf(prob / 100)
         signed = [r["加減分"] for r in rows if abs(r["加減分"]) > 0.5]
         agree = (sum(1 for x in signed if np.sign(x) == np.sign(prob - 50)) / len(signed)) if signed and prob != 50 else 0.5
         edge = abs(prob - 50)
         confidence = "高" if edge >= 15 and agree >= 0.65 else "中" if edge >= 7 and agree >= 0.5 else "低"
-        table = pd.DataFrame([{"因子": "📊 相似情境統計", "理論依據": "歷史統計：過去相同乖離位階與趨勢下的實際漲跌機率（已換成合理基準成長）",
+        table = pd.DataFrame([{"因子": "📊 基礎機率", "理論依據": base_label.get(h, "相似情境統計：過去相同乖離位階與趨勢下的實際漲跌機率（已換成合理基準成長）"),
                                "數據": f"上漲機率 {base:.0f}%", "判讀": "基礎機率", "加減分": np.nan}]
                              + [{k: v for k, v in r.items() if k not in ("key", "raw")} for r in rows])
         result[h] = {
