@@ -101,10 +101,15 @@ WATCHLIST_FILE = Path(__file__).parent / "watchlist.json"
 
 
 def load_watchlist():
+    """{"custom": {代號: 名稱}, "hidden": [被移除的預設股票代號]}"""
     try:
-        return json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
+        data = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        data = {}
+    if "custom" not in data:  # 舊格式：整個檔案就是自選股
+        data = {"custom": data, "hidden": []}
+    data.setdefault("hidden", [])
+    return data
 
 
 def save_watchlist(watchlist):
@@ -156,32 +161,49 @@ def load_market_list():
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
-STOCK_POOL[CUSTOM_CATEGORY] = st.session_state.watchlist
+WATCH = st.session_state.watchlist
+DEFAULT_STOCKS = {code: name for pool in STOCK_POOL.values() for code, name in pool.items()}
+STOCK_POOL = {cat: {c: n for c, n in pool.items() if c not in WATCH["hidden"]} for cat, pool in STOCK_POOL.items()}
+STOCK_POOL[CUSTOM_CATEGORY] = WATCH["custom"]
 ALL_STOCKS = {code: name for pool in STOCK_POOL.values() for code, name in pool.items()}
 CODE_TO_CATEGORY = {code: cat for cat, pool in STOCK_POOL.items() for code in pool}
 
 
+def _add_code(code, name):
+    if code in WATCH["hidden"]:  # 之前移除的預設股票 → 恢復
+        WATCH["hidden"].remove(code)
+    elif code not in DEFAULT_STOCKS:
+        WATCH["custom"][code] = name
+    st.session_state[f"chk_{code}"] = True
+
+
 def add_to_watchlist():
     for code in st.session_state.get("add_pick", []):
-        if code not in ALL_STOCKS:
-            st.session_state.watchlist[code] = MARKET[code][0]
-        st.session_state[f"chk_{code}"] = True
+        _add_code(code, MARKET[code][0])
     manual = st.session_state.get("add_manual", "").strip().upper()
     if manual:
         code = manual if "." in manual else manual + st.session_state.get("add_board", ".TW")
-        if code not in ALL_STOCKS:
-            st.session_state.watchlist[code] = st.session_state.get("add_manual_name", "").strip() or code
-        st.session_state[f"chk_{code}"] = True
-    save_watchlist(st.session_state.watchlist)
+        _add_code(code, st.session_state.get("add_manual_name", "").strip() or code)
+    save_watchlist(WATCH)
     st.session_state.add_pick = []
     st.session_state.add_manual = ""
     st.session_state.add_manual_name = ""
 
 
-def remove_from_watchlist(code):
-    st.session_state.watchlist.pop(code, None)
-    st.session_state.pop(f"chk_{code}", None)
-    save_watchlist(st.session_state.watchlist)
+def remove_selected():
+    for code in st.session_state.get("remove_pick", []):
+        if code in WATCH["custom"]:
+            WATCH["custom"].pop(code)
+        elif code in DEFAULT_STOCKS and code not in WATCH["hidden"]:
+            WATCH["hidden"].append(code)
+        st.session_state.pop(f"chk_{code}", None)
+    save_watchlist(WATCH)
+    st.session_state.remove_pick = []
+
+
+def restore_defaults():
+    WATCH["hidden"] = []
+    save_watchlist(WATCH)
 
 
 def clear_checks():
@@ -201,7 +223,8 @@ st.sidebar.caption("勾選的股票才會抓資料與分析；未勾選的只是
 
 # 新增股票
 MARKET = load_market_list()
-with st.sidebar.expander("➕ 新增股票到自選股"):
+with st.sidebar.expander("➕ 新增 / ➖ 移除股票", expanded=True):
+    st.markdown("**➕ 新增股票**")
     if MARKET:
         st.multiselect(
             "搜尋全市場 (輸入代號或名稱)",
@@ -217,6 +240,14 @@ with st.sidebar.expander("➕ 新增股票到自選股"):
              format_func=lambda s: "上市 (.TW)" if s == ".TW" else "上櫃 (.TWO)")
     st.button("加入並勾選", on_click=add_to_watchlist, use_container_width=True)
 
+    st.markdown("---")
+    st.markdown("**➖ 移除股票**")
+    st.multiselect("選擇要移除的股票 (可多選)", options=list(ALL_STOCKS),
+                   format_func=lambda c: f"{ALL_STOCKS[c]} ({c})", key="remove_pick")
+    st.button("移除選取的股票", on_click=remove_selected, use_container_width=True)
+    if WATCH["hidden"]:
+        st.button(f"↩️ 還原被移除的預設股票（{len(WATCH['hidden'])} 檔）", on_click=restore_defaults, use_container_width=True)
+
 # 各類別勾選清單
 for cat, pool in STOCK_POOL.items():
     if not pool:
@@ -227,12 +258,7 @@ for cat, pool in STOCK_POOL.items():
     count = f'<span class="cat-count">已勾選 {n_checked}</span>' if n_checked else ""
     st.sidebar.html(f'<div class="cat-header" style="border-left-color:{color};">{title}{count}</div>')
     for code, name in pool.items():
-        if cat == CUSTOM_CATEGORY:
-            c_chk, c_del = st.sidebar.columns([5, 1])
-            c_chk.checkbox(f"{name} ({code})", key=f"chk_{code}")
-            c_del.button("🗑️", key=f"del_{code}", on_click=remove_from_watchlist, args=(code,), help="從自選股移除")
-        else:
-            st.sidebar.checkbox(f"{name} ({code})", key=f"chk_{code}")
+        st.sidebar.checkbox(f"{name} ({code})", key=f"chk_{code}")
 
 checked_codes = [c for c in ALL_STOCKS if st.session_state.get(f"chk_{c}", False)]
 stock_code = None
@@ -292,12 +318,12 @@ def _flatten(df):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_news(query, limit=8):
-    """Google 新聞 RSS：近 7 天新聞標題 (免 API Key)"""
+def load_news(query, limit=8, days=7):
+    """Google 新聞 RSS：近 N 天新聞標題 (免 API Key)"""
     try:
         resp = requests.get(
             "https://news.google.com/rss/search",
-            params={"q": f"{query} when:7d", "hl": "zh-TW", "gl": "TW", "ceid": "TW:zh-Hant"},
+            params={"q": f"{query} when:{days}d", "hl": "zh-TW", "gl": "TW", "ceid": "TW:zh-Hant"},
             headers={"User-Agent": "Mozilla/5.0"}, timeout=15,
         )
         root = ET.fromstring(resp.content)
@@ -317,6 +343,33 @@ def load_news(query, limit=8):
         if len(news) >= limit:
             break
     return news
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_etf_holdings(code):
+    """MoneyDJ ETF 持股明細：成分股、權重、持股增減 (投信每月公布)"""
+    try:
+        html = requests.get("https://www.moneydj.com/ETF/X/Basic/Basic0007a.xdjhtm", params={"etfid": code},
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=15).text
+    except Exception:
+        return pd.DataFrame(), ""
+    pos = html.find('id="Repeater1"')
+    dates = re.findall(r"資料日期：(\d{4}/\d{2}/\d{2})", html[:pos] if pos > 0 else html)
+    soup = BeautifulSoup(html, "html.parser")
+    rows = []
+    for table_id in ("Repeater1", "Repeater2"):
+        table = soup.find("table", id=table_id)
+        if table is None:
+            continue
+        for tr in table.find_all("tr"):
+            tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+            if len(tds) >= 4 and tds[0]:
+                rows.append({"成分股": tds[0], "持股 (千股)": _to_float(tds[1]),
+                             "權重 (%)": _to_float(tds[2]), "持股增減": tds[3]})
+    holdings = pd.DataFrame(rows)
+    if not holdings.empty:
+        holdings = holdings.sort_values("權重 (%)", ascending=False).reset_index(drop=True)
+    return holdings, (dates[-1] if dates else "")
 
 
 MARKET_INDICES = {
@@ -388,15 +441,28 @@ FORECAST_HORIZONS = {"1 週": 5, "1 個月": 21, "1 年": 252}
 
 
 def compute_projection(adj, price):
-    """用歷史同期間報酬分布 + 目前波動度，估算未來價格區間"""
+    """未來價格區間 (避免把過去多頭直接外推)：
+    1. 相似情境：只取歷史上「季線乖離百分位相近 (±15%) 且季線方向相同」的日子，看它們之後的實際表現
+    2. 中性化：扣除整段歷史的平均漲幅 (漂移)，只保留「目前情境帶來的超額表現」與波動
+       → 過熱、跌破季線的股票，中位數會是負的
+    """
     rows = []
     log_ret = np.log(adj).diff().dropna()
     sigma_d = float(log_ret.iloc[-60:].std()) if len(log_ret) >= 60 else np.nan
+    ma60 = adj.rolling(60).mean()
+    bias_rank = (adj / ma60 - 1).rank(pct=True)
+    slope_up = ma60.diff(20) > 0
+    similar = ((bias_rank - bias_rank.iloc[-1]).abs() <= 0.15) & (slope_up == slope_up.iloc[-1])
     for label, h in FORECAST_HORIZONS.items():
-        fwd = (adj.shift(-h) / adj - 1).dropna()
-        if len(fwd) < max(h * 2, 60):
+        fwd_all = (adj.shift(-h) / adj - 1).dropna()
+        if len(fwd_all) < max(h * 2, 60):
             continue
-        q = fwd.quantile([0.10, 0.25, 0.50, 0.75, 0.90])
+        drift = float(fwd_all.mean())
+        fwd_sim = fwd_all[similar.reindex(fwd_all.index, fill_value=False)]
+        use_sim = len(fwd_sim) >= max(30, h)
+        fwd = fwd_sim if use_sim else fwd_all
+        neutral = (1 + fwd) / (1 + drift) - 1
+        q = neutral.quantile([0.10, 0.25, 0.50, 0.75, 0.90])
         sig = sigma_d * np.sqrt(h)
         rows.append({
             "期間": label,
@@ -405,9 +471,11 @@ def compute_projection(adj, price):
             "中位數": price * (1 + q[0.50]),
             "樂觀 (75%)": price * (1 + q[0.75]),
             "極樂觀 (90%)": price * (1 + q[0.90]),
-            "歷史上漲機率 (%)": float((fwd > 0).mean() * 100),
+            "上漲機率 (中性, %)": float((neutral > 0).mean() * 100),
+            "若延續過去趨勢": price * (1 + float(fwd.median())),
+            "過去平均漲幅 (%)": drift * 100,
+            "情境樣本": f"{len(fwd_sim)} 天" if use_sim else "不足，改用全部",
             "目前波動 ±1σ": f"{price * np.exp(-sig):.2f} ~ {price * np.exp(sig):.2f}" if not np.isnan(sig) else "—",
-            "樣本數": len(fwd),
             "_days": h,
         })
     return pd.DataFrame(rows)
@@ -744,6 +812,9 @@ try:
     # 綜合評估用的外部資料 (皆有快取，只針對主分析標的抓取)
     stock_news = load_news(f"{stock_name} {stock_code.split('.')[0]}")
     world_news = load_news("美股 OR 聯準會 OR 關稅 OR 地緣政治 OR 費半 OR 台股大盤", limit=10)
+    # 主動搜尋利空與產業展望，避免只看到正面消息
+    bad_news = load_news(f"{stock_name} (利空 OR 下修 OR 衰退 OR 虧損 OR 砍單 OR 調降 OR 賣超 OR 裁員 OR 競爭 OR 訴訟 OR 跌停)", days=30)
+    outlook_news = load_news(f"{stock_name} (展望 OR 前景 OR 法說 OR 產業趨勢 OR 營收)", days=30)
     market_ctx = load_market_context()
     seasonality = load_seasonality(stock_code)
     today = datetime.now(TAIPEI)
@@ -776,6 +847,50 @@ try:
 
     # 未來走勢：歷史報酬分布、技術面支撐壓力、本益比推估合理價
     long_adj = load_long_history(stock_code)
+
+    # ETF 成分股分析：前 10 大成分股的表現、風險燈號與持股增減
+    is_etf = stock_code.split('.')[0].startswith("00")
+    etf_holdings, etf_date, etf_top, etf_summary = pd.DataFrame(), "", pd.DataFrame(), ""
+    if is_etf:
+        etf_holdings, etf_date = load_etf_holdings(stock_code)
+    if not etf_holdings.empty:
+        name_to_code = {name: code for code, (name, _) in MARKET.items()}
+        top_rows = []
+        for _, h in etf_holdings.head(10).iterrows():
+            code = name_to_code.get(h["成分股"])
+            row = {"成分股": h["成分股"], "權重 (%)": h["權重 (%)"], "持股增減": h["持股增減"],
+                   "近一月 (%)": np.nan, "燈號": "—", "主要警訊": ""}
+            if code:
+                try:
+                    hd = add_indicators(get_price_data(code))
+                    row["近一月 (%)"] = round(float((hd['Close'].iloc[-1] / hd['Close'].iloc[-22] - 1) * 100), 1)
+                    hr = assess_risk(hd, load_long_history(code))
+                    row["燈號"] = f"{hr['emoji']} {hr['level']}"
+                    row["主要警訊"] = "、".join(s for _, _, s in hr["items"][:2]) or "無"
+                except Exception:
+                    pass
+            top_rows.append(row)
+        etf_top = pd.DataFrame(top_rows)
+        weights = etf_top["權重 (%)"].fillna(0)
+        contrib = (weights * etf_top["近一月 (%)"].fillna(0) / 100).sum()
+        risky_weight = weights[etf_top["燈號"].str.contains("警戒|高風險")].sum()
+        def big_change(s):
+            v = _to_float(str(s).replace("%", ""))
+            if np.isnan(v):  # 非數字 (例如新納入) 也視為重大變化
+                return str(s).strip() not in ("", "-", "--")
+            return abs(v) >= 5
+        big_changes = etf_holdings[etf_holdings["持股增減"].map(big_change)]
+        etf_summary = (
+            f"持股資料日期 {etf_date}，共 {len(etf_holdings)} 檔成分股；前十大權重合計 {weights.sum():.1f}%，"
+            f"最大成分股 {etf_top.iloc[0]['成分股']} 占 {etf_top.iloc[0]['權重 (%)']:.1f}%（集中度風險）。\n"
+            f"前十大成分股近一月加權貢獻約 {contrib:+.2f} 個百分點；其中亮「警戒 / 高風險」燈號的權重合計 {risky_weight:.1f}%。\n"
+            "前十大成分股：\n" + "\n".join(
+                f"- {r['成分股']} 權重 {r['權重 (%)']:.2f}%，近一月 {r['近一月 (%)']:+.1f}%，{r['燈號']}，持股增減 {r['持股增減']}，警訊：{r['主要警訊'] or '無'}"
+                for _, r in etf_top.iterrows()) +
+            "\n持股增減幅度較大（±5% 以上）的成分股：" +
+            ("、".join(f"{r['成分股']} {r['持股增減']}" for _, r in big_changes.head(10).iterrows()) or "無")
+        )
+    etf_news = load_news(f"{stock_name} 成分股 (調整 OR 納入 OR 剔除 OR 換股)", limit=6, days=90) if is_etf else []
 
     # 風險評估 (主分析標的含估值面；其他勾選股票只看價量)
     pe_vs_peer = (current_pe / peer_pe_median - 1) * 100 if not np.isnan(peer_pe_median) and not np.isnan(current_pe) else np.nan
@@ -826,8 +941,9 @@ try:
             return "（歷史資料不足）"
         return "\n".join(
             f"- {r['期間']}：10%={r['悲觀 (10%)']:.2f}、25%={r['保守 (25%)']:.2f}、中位數={r['中位數']:.2f}、"
-            f"75%={r['樂觀 (75%)']:.2f}、90%={r['極樂觀 (90%)']:.2f}，歷史上漲機率 {r['歷史上漲機率 (%)']:.0f}%，"
-            f"以近 60 日波動度估算 ±1σ 區間 {r['目前波動 ±1σ']}"
+            f"75%={r['樂觀 (75%)']:.2f}、90%={r['極樂觀 (90%)']:.2f}，中性上漲機率 {r['上漲機率 (中性, %)']:.0f}%；"
+            f"若延續過去趨勢中位數 {r['若延續過去趨勢']:.2f}（過去平均漲幅 {r['過去平均漲幅 (%)']:+.1f}%，多頭期間不代表未來）；"
+            f"相似情境樣本 {r['情境樣本']}；近 60 日波動度 ±1σ 區間 {r['目前波動 ±1σ']}"
             for _, r in projection.iterrows())
 
     def show_news(items):
@@ -847,6 +963,11 @@ try:
         lines = [f"- {r['月份']}：平均 {r['平均報酬 (%)']:+.2f}%，中位數 {r['中位數 (%)']:+.2f}%，上漲機率 {r['上漲機率 (%)']:.0f}%（{r['樣本年數']} 年）"
                  for _, r in seasonality.iterrows()]
         return "\n".join(lines)
+
+    etf_block = ""
+    if is_etf:
+        etf_block = (f"【ETF 成分股分析】\n{etf_summary or '（抓不到持股明細）'}\n"
+                     f"近 90 天成分股調整新聞：\n{news_text(etf_news)}\n")
 
     data_snapshot = f"""【標的】{stock_name}（{stock_code}），產業分類：{category}，資料時間：{today:%Y-%m-%d %H:%M}（台北）
 
@@ -877,6 +998,13 @@ try:
 【月份效應（近 10 年，還原除權息月報酬）】本月為 {this_m} 月，下個月為 {next_m} 月
 {season_text()}
 
+{etf_block}
+【近 30 天潛在利空新聞標題（用利空關鍵字搜尋，需判斷是否真的與該股有關）】
+{news_text(bad_news)}
+
+【近 30 天產業展望 / 法說 / 營收新聞標題】
+{news_text(outlook_news)}
+
 【個股近 7 天新聞標題】
 {news_text(stock_news)}
 
@@ -895,11 +1023,16 @@ try:
         if projection.empty:
             st.info("歷史資料不足，無法計算統計區間。")
         else:
-            st.markdown(f"**📊 歷史經驗區間**：統計近 {history_years:.1f} 年，每一天往後持有 1 週、1 個月、1 年的實際漲跌幅，套用到目前股價 {current_price:.2f}。")
+            st.markdown(
+                f"**📊 中性情境區間**（近 {history_years:.1f} 年資料，以目前股價 {current_price:.2f} 為基準）\n"
+                "- 只取歷史上和現在**相似情境**（季線乖離位階相近、季線方向相同）的日子，看之後實際漲跌\n"
+                "- **扣除過去的平均漲幅**：過去 10 年台股大多頭，直接外推會讓每檔都看漲；中性化後只保留目前情境本身的多空影響\n"
+                "- 「若延續過去趨勢」欄位是不扣除的版本，僅供對照")
             show = projection.drop(columns=["_days"]).copy()
-            for col in ["悲觀 (10%)", "保守 (25%)", "中位數", "樂觀 (75%)", "極樂觀 (90%)"]:
+            for col in ["悲觀 (10%)", "保守 (25%)", "中位數", "樂觀 (75%)", "極樂觀 (90%)", "若延續過去趨勢"]:
                 show[col] = show[col].map(lambda p: f"{p:.2f}（{(p / current_price - 1) * 100:+.1f}%）")
-            show["歷史上漲機率 (%)"] = show["歷史上漲機率 (%)"].round(0)
+            show["上漲機率 (中性, %)"] = show["上漲機率 (中性, %)"].round(0)
+            show["過去平均漲幅 (%)"] = show["過去平均漲幅 (%)"].round(1)
             st.dataframe(show, use_container_width=True, hide_index=True)
 
             # 扇形圖：近半年走勢 + 未來區間
@@ -1012,6 +1145,38 @@ try:
             st.subheader("🌏 國際財經新聞")
             show_news(world_news[:8])
 
+        if is_etf:
+            st.subheader(f"🧺 {stock_name} 成分股分析")
+            if etf_top.empty:
+                st.caption("暫時抓不到此 ETF 的持股明細。")
+            else:
+                st.caption(f"持股資料日期 {etf_date}（投信每月公布），共 {len(etf_holdings)} 檔成分股。「持股增減」為與上期相比的持股股數變化。")
+                e1, e2, e3 = st.columns(3, gap="large")
+                e1.metric("前十大權重合計", f"{etf_top['權重 (%)'].sum():.1f}%",
+                          delta=f"最大 {etf_top.iloc[0]['成分股']} {etf_top.iloc[0]['權重 (%)']:.1f}%", delta_color="off")
+                e2.metric("前十大近一月加權貢獻", f"{contrib:+.2f} 個百分點")
+                e3.metric("亮警戒 / 高風險的權重", f"{risky_weight:.1f}%",
+                          delta="成分股轉弱" if risky_weight >= 20 else "成分股大致穩定",
+                          delta_color="inverse" if risky_weight >= 20 else "off")
+                st.dataframe(etf_top, use_container_width=True, hide_index=True)
+                if not big_changes.empty:
+                    st.markdown("**持股增減幅度較大（±5% 以上）的成分股：** " +
+                                "、".join(f"{r['成分股']} {r['持股增減']}" for _, r in big_changes.head(10).iterrows()))
+                with st.expander(f"查看全部 {len(etf_holdings)} 檔成分股"):
+                    st.dataframe(etf_holdings, use_container_width=True, hide_index=True)
+            if etf_news:
+                st.markdown("**📰 近 90 天成分股調整新聞**")
+                show_news(etf_news)
+
+        bad_col, outlook_col = st.columns(2, gap="large")
+        with bad_col:
+            st.subheader("⚠️ 近 30 天潛在利空新聞")
+            st.caption("用「下修、衰退、砍單、賣超…」等關鍵字搜尋，部分可能與該股無直接關係。")
+            show_news(bad_news)
+        with outlook_col:
+            st.subheader("🔭 產業展望 / 法說 / 營收")
+            show_news(outlook_news)
+
     # ── 技術分析 ──
     with tab_tech:
         c1, c2, c3 = st.columns(3, gap="large")
@@ -1088,17 +1253,22 @@ try:
         st.subheader(f"🧠 {stock_name} 綜合評估報告")
         st.caption(f"使用 {ai_provider} / {model_choice}。資料涵蓋新聞時事、國際局勢、技術分析、月份效應與估值；同一檔股票每天只自動產生一次，不重複計費。")
 
-        report_key = f"report_v2_{stock_code}_{today:%Y%m%d}_{model_choice}"
+        report_key = f"report_v3_{stock_code}_{today:%Y%m%d}_{model_choice}"
         c_auto, c_regen = st.columns([3, 1])
         auto_report = c_auto.toggle("選到股票時自動產生報告", value=True, key="auto_report")
         regenerate = c_regen.button("🔄 重新產生", use_container_width=True)
+
+        etf_prompt = ("\n   ## 🧺 ETF 成分股分析\n"
+                      "   （這是 ETF，請評估前十大成分股的表現與風險燈號、集中度風險、持股增減與成分股調整新聞，"
+                      "說明成分股變化對 ETF 未來走勢的影響；成分股中亮警戒 / 高風險的權重越高，ETF 下跌風險越大）") if is_etf else ""
 
         report_prompt = f"""你是資深台股研究員，請根據下方「即時資料」為 {stock_name}（{stock_code}）撰寫一份專業的綜合評估報告。
 
 撰寫規則：
 1. 使用繁體中文與 Markdown，依序輸出以下章節，每個章節用條列逐項寫出評語，並在章節最後標註「**評等：偏多 / 中性 / 偏空**」三選一：
    ## 📰 一、新聞時事
-   （挑出與該股相關的重要新聞逐條點評利多或利空，無關的新聞略過）
+   （挑出與該股相關的重要新聞逐條點評利多或利空，無關的新聞略過；「潛在利空新聞」與「產業展望」兩區都要逐條檢視，
+    真正相關的利空一定要列出，不可略過）{etf_prompt}
    ## 🌏 二、國際局勢
    （美股、費半、利率、匯率、VIX、地緣政治與關稅等對該股的影響）
    ## 📐 三、技術分析
@@ -1108,6 +1278,11 @@ try:
    ## 💰 五、估值與位階
    （本益比與同類股中位數比較、近一年本益比百分位、股價淨值比、殖利率、52 週位階；缺資料就說明無法評估，ETF 改評估殖利率與位階）
    ## ⚠️ 六、主要風險
+   ## 🐻 空方觀點與長期隱憂
+   （扮演看空的分析師，至少列出 3 點「這檔股票可能會跌、甚至長期沒落」的理由，涵蓋：
+    產業趨勢是否轉弱或被新技術取代、競爭對手與削價、客戶集中與砍單、獲利與毛利下滑、估值過高、
+    政策 / 關稅 / 地緣政治、籌碼（外資賣超、融資過高）。每點說明可能性（高 / 中 / 低）與觀察指標。
+    若認為看空理由比看多理由更有力，要明確說出來）
    ## 🔮 七、未來走勢預估
    （綜合技術面、基本面、歷史報酬分布、月份效應與國際局勢，用表格列出：
     期間 | 預估區間（低～高） | 基準預估價 | 方向（偏漲 / 盤整 / 偏跌） | 信心（高 / 中 / 低） | 主要依據
@@ -1115,13 +1290,15 @@ try:
     - 1 週：以技術面支撐壓力、目前波動度為主
     - 1 個月：技術面趨勢 + 月份效應 + 新聞與國際局勢
     - 1 年：以本益比推估合理價、歷史 1 年報酬分布與產業前景為主
-    基準預估價原則上落在歷史 25%~75% 區間內；若超出，必須說明理由。表格下方逐期說明推論過程，
-    並列出「若跌破 X 則轉弱、若站上 Y 則轉強」的關鍵價位。）
+    「中性情境區間」已扣除過去多頭的平均漲幅，是預估的起點；「若延續過去趨勢」只是對照，不可直接當作預估。
+    不可預設看漲：依據利多與利空的強弱決定方向，技術面轉弱、估值偏高、利空新聞或產業趨勢不利時，應給出「偏跌」並寫出下跌目標價。
+    表格下方逐期說明推論過程，並列出「若跌破 X 則轉弱、若站上 Y 則轉強」的關鍵價位。）
 2. 最後輸出「## 🧾 總結」：
    - 先用表格列出「面向 | 評等 | 一句話評語」
    - 再給出整體評等（偏多 / 中性 / 偏空）與信心程度（高 / 中 / 低）
    - 用一句話總結 1 週、1 個月、1 年的基準預估價
 3. 只能根據提供的資料推論，不要捏造數字或新聞內容；新聞只有標題，判讀時要保守。價格預估是機率性的推估，要說明不確定性。
+   保持多空中立：過去 10 年台股處於大多頭，歷史數據天生偏多，評估時要主動修正這個偏誤，不要因為「過去一直漲」就推論未來會漲。
 4. 結尾加一行：「以上為資料彙整與分析，非投資建議，請自行判斷風險。」
 
 即時資料：
