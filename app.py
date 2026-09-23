@@ -22,8 +22,8 @@ GOLD_SOFT = "#B8962E"
 TEXT = "#E6E9EF"
 MUTED = "#8A96AD"
 
-st.markdown(f"""
-<style>
+# 用 st.html 注入樣式 (新版 st.markdown 會把 <style> 當成文字顯示)
+st.html(f"""<style>
     .stApp {{ background: linear-gradient(180deg, {NAVY} 0%, #0E1A30 100%); }}
     section[data-testid="stSidebar"] {{ background-color: {NAVY_LIGHT}; border-right: 1px solid rgba(212,175,55,0.25); }}
     h1, h2, h3 {{ color: {GOLD} !important; letter-spacing: 0.5px; }}
@@ -59,8 +59,7 @@ st.markdown(f"""
     .sector-badge .icon {{ font-size: 1.5rem; }}
     .sector-badge .name {{ color: {TEXT}; font-weight: 600; }}
     .sector-badge .sub {{ color: {MUTED}; font-size: 0.8rem; }}
-</style>
-""", unsafe_allow_html=True)
+</style>""")
 
 st.title("📈 2026 台股熱門爆量標的 AI 戰情室")
 
@@ -206,14 +205,12 @@ if checked_codes:
     stock_name = ALL_STOCKS[stock_code]
     category = CODE_TO_CATEGORY[stock_code]
     cat_icon, cat_color = CATEGORY_STYLE[category]
-    st.sidebar.markdown(f"""
-<div class="sector-badge">
+    st.sidebar.html(f"""<div class="sector-badge">
     <div class="swatch" style="background:{cat_color};"></div>
     <div class="icon">{cat_icon}</div>
     <div><div class="name">{stock_name} <span class="sub">{stock_code}</span></div>
     <div class="sub" style="color:{cat_color};">{category}</div></div>
-</div>
-""", unsafe_allow_html=True)
+</div>""")
 
 # AI設定區
 st.sidebar.markdown("---")
