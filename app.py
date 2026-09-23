@@ -96,24 +96,46 @@ def save_watchlist(watchlist):
     WATCHLIST_FILE.write_text(json.dumps(watchlist, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_market_list():
-    """從證交所 / 櫃買中心 OpenAPI 取得全市場股票與 ETF 清單 (只抓名稱，一天更新一次)"""
+def _to_float(value):
+    try:
+        return float(str(value).replace(",", ""))
+    except ValueError:
+        return np.nan
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_official_quotes():
+    """從證交所 / 櫃買中心 OpenAPI 取得全市場最新一個交易日的官方收盤行情 (10 分鐘更新一次)"""
     pattern = re.compile(r"^(\d{4}|00\d{2,4}[A-Z]?)$")  # 一般股票與 ETF，排除權證
-    market = {}
+    quotes = {}
     sources = [
-        ("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", "Code", "Name", ".TW", "上市"),
-        ("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", "SecuritiesCompanyCode", "CompanyName", ".TWO", "上櫃"),
+        ("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", ".TW", "上市",
+         {"code": "Code", "name": "Name", "Open": "OpeningPrice", "High": "HighestPrice",
+          "Low": "LowestPrice", "Close": "ClosingPrice", "Volume": "TradeVolume"}),
+        ("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", ".TWO", "上櫃",
+         {"code": "SecuritiesCompanyCode", "name": "CompanyName", "Open": "Open", "High": "High",
+          "Low": "Low", "Close": "Close", "Volume": "TradingShares"}),
     ]
-    for url, code_key, name_key, suffix, board in sources:
+    for url, suffix, board, f in sources:
         try:
             for row in requests.get(url, timeout=15).json():
-                code = row.get(code_key, "").strip()
-                if pattern.match(code):
-                    market[code + suffix] = (row.get(name_key, "").strip(), board)
+                code = row.get(f["code"], "").strip()
+                if not pattern.match(code):
+                    continue
+                roc = row.get("Date", "")  # 民國年，例如 1150922
+                quotes[code + suffix] = {
+                    "name": row.get(f["name"], "").strip(),
+                    "board": board,
+                    "Date": pd.Timestamp(int(roc[:-4]) + 1911, int(roc[-4:-2]), int(roc[-2:])),
+                    **{k: _to_float(row.get(f[k])) for k in ["Open", "High", "Low", "Close", "Volume"]},
+                }
         except Exception:
             continue
-    return market
+    return quotes
+
+
+def load_market_list():
+    return {code: (q["name"], q["board"]) for code, q in load_official_quotes().items()}
 
 
 if "watchlist" not in st.session_state:
@@ -225,11 +247,26 @@ model_choice = st.sidebar.selectbox("選擇 AI 模型", AI_PROVIDERS[ai_provider
 def load_data(code):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=365)
-    df = yf.download(code, start=start_date, end=end_date)
+    # auto_adjust=False：Close 為交易所原始收盤價，Adj Close 為還原除權息價
+    df = yf.download(code, start=start_date, end=end_date, auto_adjust=False)
     # 移除多層索引 (yfinance v0.2+ 新版防錯)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
+
+
+def get_price_data(code):
+    """Yahoo 歷史資料 + 交易所官方最新行情校正 (Yahoo 偶爾會缺某天或數字不同)"""
+    df = load_data(code).dropna(subset=['Close']).copy()
+    q = load_official_quotes().get(code)
+    if q is None or np.isnan(q["Close"]) or df.empty:
+        return df
+    cols = ["Open", "High", "Low", "Close", "Volume"]
+    is_new = q["Date"] not in df.index
+    df.loc[q["Date"], cols] = [q[c] for c in cols]
+    if is_new and "Adj Close" in df.columns:
+        df.loc[q["Date"], "Adj Close"] = q["Close"]
+    return df.sort_index()
 
 
 def add_indicators(df):
@@ -343,7 +380,7 @@ if not checked_codes:
     st.stop()
 
 try:
-    df = load_data(stock_code)
+    df = get_price_data(stock_code)
     if df.empty:
         st.warning(f"{stock_name} ({stock_code}) 查無資料，請確認代號與上市/上櫃是否正確。")
         st.stop()
@@ -470,12 +507,14 @@ try:
             cmp_fig = go.Figure()
             summary = []
             for i, code in enumerate(checked_codes):
-                cdf = load_data(code)
+                cdf = get_price_data(code)
                 if cdf.empty:
                     st.warning(f"{ALL_STOCKS[code]} ({code}) 查無資料")
                     continue
-                close = cdf['Close'].dropna()
-                ret = (close / close.iloc[0] - 1) * 100
+                close = cdf['Close']
+                # 報酬率用還原除權息價 (含息報酬)，股價則顯示交易所原始收盤價
+                adj = cdf['Adj Close'].fillna(close) if 'Adj Close' in cdf.columns else close
+                ret = (adj / adj.iloc[0] - 1) * 100
                 y = ret if mode.startswith("累積") else close
                 cmp_fig.add_trace(go.Scatter(x=close.index, y=y, name=f"{ALL_STOCKS[code]} ({code})",
                                              line=dict(color=palette[i % len(palette)], width=2)))
@@ -483,8 +522,8 @@ try:
                     "股票": f"{ALL_STOCKS[code]} ({code})",
                     "產業": CODE_TO_CATEGORY[code],
                     "最新收盤": round(float(close.iloc[-1]), 2),
-                    "近一年報酬率 (%)": round(float(ret.iloc[-1]), 2),
-                    "最大回撤 (%)": round(float(((close / close.cummax()) - 1).min() * 100), 2),
+                    "近一年含息報酬率 (%)": round(float(ret.iloc[-1]), 2),
+                    "最大回撤 (%)": round(float(((adj / adj.cummax()) - 1).min() * 100), 2),
                 })
             if mode.startswith("累積"):
                 cmp_fig.add_hline(y=0, line=dict(color=MUTED, dash="dot", width=1))
