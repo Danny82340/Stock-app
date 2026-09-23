@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import requests
 import json
 import re
+import time
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -55,6 +56,15 @@ st.html(f"""<style>
 
     .stButton > button {{ background: {GOLD}; color: {NAVY}; border: none; font-weight: 600; }}
     .stButton > button:hover {{ background: {GOLD_SOFT}; color: {NAVY}; }}
+
+    /* 側邊欄產業大分類標題 */
+    .cat-header {{
+        font-size: 1.3rem; font-weight: 700; color: {TEXT};
+        background: {NAVY}; border-left: 6px solid {GOLD}; border-radius: 8px;
+        padding: 8px 12px; margin: 18px 0 4px 0;
+        display: flex; align-items: center; justify-content: space-between;
+    }}
+    .cat-count {{ font-size: 0.8rem; font-weight: 500; color: {GOLD}; }}
 
     .sector-badge {{
         display: flex; align-items: center; gap: 10px;
@@ -211,17 +221,18 @@ with st.sidebar.expander("➕ 新增股票到自選股"):
 for cat, pool in STOCK_POOL.items():
     if not pool:
         continue
-    icon, _ = CATEGORY_STYLE[cat]
+    icon, color = CATEGORY_STYLE[cat]
     n_checked = sum(st.session_state.get(f"chk_{c}", False) for c in pool)
-    label = f"{icon} {cat}" + (f"（已勾選 {n_checked}）" if n_checked else "")
-    with st.sidebar.expander(label, expanded=n_checked > 0):
-        for code, name in pool.items():
-            if cat == CUSTOM_CATEGORY:
-                c_chk, c_del = st.columns([5, 1])
-                c_chk.checkbox(f"{name} ({code})", key=f"chk_{code}")
-                c_del.button("🗑️", key=f"del_{code}", on_click=remove_from_watchlist, args=(code,), help="從自選股移除")
-            else:
-                st.checkbox(f"{name} ({code})", key=f"chk_{code}")
+    title = cat if cat.startswith(icon) else f"{icon} {cat}"
+    count = f'<span class="cat-count">已勾選 {n_checked}</span>' if n_checked else ""
+    st.sidebar.html(f'<div class="cat-header" style="border-left-color:{color};">{title}{count}</div>')
+    for code, name in pool.items():
+        if cat == CUSTOM_CATEGORY:
+            c_chk, c_del = st.sidebar.columns([5, 1])
+            c_chk.checkbox(f"{name} ({code})", key=f"chk_{code}")
+            c_del.button("🗑️", key=f"del_{code}", on_click=remove_from_watchlist, args=(code,), help="從自選股移除")
+        else:
+            st.sidebar.checkbox(f"{name} ({code})", key=f"chk_{code}")
 
 checked_codes = [c for c in ALL_STOCKS if st.session_state.get(f"chk_{c}", False)]
 stock_code = None
@@ -363,25 +374,67 @@ def load_seasonality(code):
     }, index=g.mean().index)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_official_valuation():
+    """證交所 / 櫃買中心官方公布的全市場本益比、殖利率、股價淨值比 (每日更新)"""
+    vals = {}
+    sources = [
+        ("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", ".TW",
+         {"code": "Code", "pe": "PEratio", "yield": "DividendYield", "pb": "PBratio"}),
+        ("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis", ".TWO",
+         {"code": "SecuritiesCompanyCode", "pe": "PriceEarningRatio", "yield": "YieldRatio", "pb": "PriceBookRatio"}),
+    ]
+    for url, suffix, f in sources:
+        try:
+            for row in requests.get(url, timeout=15).json():
+                pe = _to_float(row.get(f["pe"]))
+                vals[row.get(f["code"], "").strip() + suffix] = {
+                    "本益比": pe if pe > 0 else np.nan,  # 虧損公司不列本益比
+                    "殖利率 (%)": _to_float(row.get(f["yield"])),
+                    "股價淨值比": _to_float(row.get(f["pb"])),
+                }
+        except Exception:
+            continue
+    return vals
+
+
+@st.cache_data(ttl=86400, show_spinner="正在向證交所載入近一年本益比（約 20 秒）...")
+def load_pe_history(stock_no, months=12):
+    """證交所個股每日本益比 (近 N 個月，僅上市股票)；證交所有流量限制，每次請求間隔 1.5 秒"""
+    now = datetime.now(TAIPEI)
+    points = {}
+    for i in range(months):
+        y, m = now.year, now.month - i
+        if m <= 0:
+            y, m = y - 1, m + 12
+        try:
+            j = requests.get("https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU",
+                             params={"date": f"{y}{m:02d}01", "stockNo": stock_no, "response": "json"}, timeout=15).json()
+            fields = j.get("fields", [])
+            di, pi = fields.index("日期"), fields.index("本益比")
+            for r in j.get("data", []):
+                roc_y, mm, dd = map(int, re.findall(r"\d+", r[di]))
+                pe = _to_float(r[pi])
+                if pe > 0:
+                    points[pd.Timestamp(roc_y + 1911, mm, dd)] = pe
+        except Exception:
+            pass
+        time.sleep(1.5)
+    return pd.Series(points, dtype=float).sort_index()
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_valuation(code):
-    """估值資料 (Yahoo 有時抓不到，抓不到就略過)"""
+def load_yahoo_extras(code):
+    """Yahoo 補充資料：市值與 Beta (抓不到就略過)"""
     try:
         info = yf.Ticker(code).info
     except Exception:
         return {}
-    fields = {"trailingPE": "本益比", "priceToBook": "股價淨值比", "trailingAnnualDividendYield": "近一年殖利率 (%)",
-              "marketCap": "市值 (億元)", "beta": "Beta"}
     result = {}
-    for key, label in fields.items():
-        value = info.get(key)
-        if not isinstance(value, (int, float)):
-            continue
-        if key == "marketCap":
-            value = value / 1e8
-        elif key == "trailingAnnualDividendYield":  # Yahoo 回傳小數，例如 0.045
-            value = value * 100
-        result[label] = round(float(value), 2)
+    if isinstance(info.get("marketCap"), (int, float)):
+        result["市值 (億元)"] = round(info["marketCap"] / 1e8, 0)
+    if isinstance(info.get("beta"), (int, float)):
+        result["Beta"] = round(float(info["beta"]), 2)
     return result
 
 
@@ -563,8 +616,32 @@ try:
     world_news = load_news("美股 OR 聯準會 OR 關稅 OR 地緣政治 OR 費半 OR 台股大盤", limit=10)
     market_ctx = load_market_context()
     seasonality = load_seasonality(stock_code)
-    valuation = load_valuation(stock_code)
     today = datetime.now(TAIPEI)
+
+    # 估值：官方本益比 / 殖利率 / 股價淨值比 + 同類股比較 + 近一年本益比區間
+    official_vals = load_official_valuation()
+    own_val = official_vals.get(stock_code, {})
+    current_pe = own_val.get("本益比", np.nan)
+    peer_pes = [official_vals.get(c, {}).get("本益比", np.nan) for c in STOCK_POOL.get(category, {}) if c != stock_code]
+    peer_pes = [p for p in peer_pes if not np.isnan(p)]
+    peer_pe_median = float(np.median(peer_pes)) if category != CUSTOM_CATEGORY and len(peer_pes) >= 2 else np.nan
+
+    pe_hist = pd.Series(dtype=float)
+    pe_hist_key = f"pe_hist_{stock_code}"
+    if st.session_state.get(pe_hist_key) and stock_code.endswith(".TW") and not np.isnan(current_pe):
+        pe_hist = load_pe_history(stock_code.split('.')[0])
+    pe_pct = float((pe_hist < current_pe).mean() * 100) if len(pe_hist) > 20 else np.nan
+
+    valuation = {k: round(v, 2) for k, v in own_val.items() if not np.isnan(v)}
+    if not np.isnan(peer_pe_median):
+        valuation["同類股本益比中位數"] = round(peer_pe_median, 2)
+    if not np.isnan(pe_pct):
+        valuation["近一年本益比區間"] = f"{pe_hist.min():.1f} ~ {pe_hist.max():.1f}（平均 {pe_hist.mean():.1f}，目前位於 {pe_pct:.0f} 百分位）"
+    valuation.update(load_yahoo_extras(stock_code))
+    if not own_val:
+        valuation["備註"] = "ETF 或無官方本益比資料"
+    elif np.isnan(current_pe):
+        valuation["備註"] = "近四季虧損，無本益比"
     this_m, next_m = today.month, today.month % 12 + 1
 
     def show_news(items):
@@ -623,6 +700,43 @@ try:
             st.metric(label="KD 技術指標狀態", value=f"K:{current_k:.1f} / D:{current_d:.1f}", delta=kd_status, delta_color="normal")
         with col3:
             st.metric(label="60MA 季線乖離預警", value=f"{bias_60:+.2f}%", delta=bias_text, delta_color=bias_color)
+
+        st.subheader("💰 估值評估（證交所 / 櫃買中心官方資料）")
+        if not own_val:
+            st.caption("此標的沒有官方本益比資料（ETF 不適用本益比評估）。")
+        else:
+            v1, v2, v3 = st.columns(3, gap="large")
+            with v1:
+                if np.isnan(current_pe):
+                    st.metric("本益比 (PER)", "—", delta="近四季虧損", delta_color="off")
+                elif not np.isnan(peer_pe_median):
+                    diff = (current_pe / peer_pe_median - 1) * 100
+                    st.metric("本益比 (PER)", f"{current_pe:.2f} 倍",
+                              delta=f"比同類股中位數 {peer_pe_median:.1f} 倍{'高' if diff > 0 else '低'} {abs(diff):.0f}%",
+                              delta_color="inverse")
+                else:
+                    st.metric("本益比 (PER)", f"{current_pe:.2f} 倍")
+            with v2:
+                st.metric("股價淨值比 (PBR)", f"{own_val.get('股價淨值比', np.nan):.2f} 倍")
+            with v3:
+                st.metric("殖利率", f"{own_val.get('殖利率 (%)', np.nan):.2f}%")
+
+            if stock_code.endswith(".TW") and not np.isnan(current_pe):
+                if pe_hist.empty:
+                    st.button("📈 載入近一年本益比區間（約 20 秒）",
+                              on_click=lambda: st.session_state.update({pe_hist_key: True}))
+                elif not np.isnan(pe_pct):
+                    level = "偏低" if pe_pct < 25 else "偏高" if pe_pct > 75 else "合理"
+                    st.markdown(f"近一年本益比 **{pe_hist.min():.1f} ~ {pe_hist.max():.1f} 倍**（平均 {pe_hist.mean():.1f}），"
+                                f"目前 {current_pe:.1f} 倍位於 **{pe_pct:.0f} 百分位**，屬於歷史區間的 **{level}** 位置。")
+                    pe_fig = go.Figure()
+                    pe_fig.add_trace(go.Scatter(x=pe_hist.index, y=pe_hist, name="本益比", line=dict(color=GOLD, width=2)))
+                    for q, label, color in [(0.25, "25 百分位", "#30A46C"), (0.5, "中位數", MUTED), (0.75, "75 百分位", "#E5484D")]:
+                        pe_fig.add_hline(y=float(pe_hist.quantile(q)), line=dict(color=color, dash="dash", width=1),
+                                         annotation_text=label, annotation_position="right")
+                    st.plotly_chart(style_fig(pe_fig, 280), use_container_width=True)
+            elif stock_code.endswith(".TWO"):
+                st.caption("上櫃股票目前只提供當日本益比，暫無歷史區間。")
 
         st.subheader("📊 股價歷史波動圖")
         fig = go.Figure()
@@ -732,7 +846,7 @@ try:
    ## 📅 四、月份效應
    （本月與下個月的歷史表現與可能的季節性原因，例如除權息、財報、法說會、作帳行情）
    ## 💰 五、估值與位階
-   （本益比、殖利率、52 週位階等；缺資料就說明無法評估）
+   （本益比與同類股中位數比較、近一年本益比百分位、股價淨值比、殖利率、52 週位階；缺資料就說明無法評估，ETF 改評估殖利率與位階）
    ## ⚠️ 六、主要風險
 2. 最後輸出「## 🧾 總結」：
    - 先用表格列出「面向 | 評等 | 一句話評語」
