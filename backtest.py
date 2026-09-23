@@ -219,10 +219,42 @@ def fit_logit(X, y, lam=5.0, iters=30):
     return w
 
 
-def horizon_features(df, key):
-    cols = sorted(c for c in df.columns if c.startswith(f"c{key}_"))
-    X = np.c_[_logit(df[f"stat_{key}"].fillna(50).values), df[cols].fillna(0).values / 10]
-    return X, ["stat"] + [c[len(f"c{key}_"):] for c in cols]
+HORIZON_DAYS = {"1d": 1, "1w": 5, "1m": 21, "1y": 252}
+MIN_T = 2.0  # 顯著性門檻 (t ≥ 2 約等於 95% 信心)
+
+
+def factor_significance(x, ret, days):
+    """因子與未來報酬的相關係數與 t 值；樣本期間重疊時 (每 step 天取樣、看 days 天報酬) 有效樣本數打折，避免高估顯著性"""
+    x, y = np.asarray(x, float), np.asarray(ret, float)
+    ok = ~(np.isnan(x) | np.isnan(y))
+    x, y = x[ok], y[ok]
+    if len(x) < 30 or np.std(x) == 0:
+        return 0.0, 0.0, 0
+    lo, hi = np.percentile(y, [1, 99])
+    y = np.clip(y, lo, hi)  # 去除極端值影響
+    r = float(np.corrcoef(x, y)[0, 1])
+    n_eff = len(x) * min(1.0, ARGS.step / days)
+    t = r * np.sqrt(max(n_eff - 2, 1) / max(1 - r * r, 1e-9))
+    return r, float(t), int(n_eff)
+
+
+def select_factors(train, key, candidates):
+    """只保留與未來報酬「正相關且顯著」的因子 (用訓練期判斷，避免偷看驗證期)"""
+    kept, removed = [], {}
+    for name, col in candidates:
+        r, t, n_eff = factor_significance(train[col].fillna(0 if name != "stat" else 50), train[f"ret_{key}"], HORIZON_DAYS[key])
+        if r > 0 and t >= MIN_T:
+            kept.append((name, col))
+        else:
+            removed[name] = {"r": round(r, 4), "t": round(t, 2), "n_eff": n_eff}
+    return kept, removed
+
+
+def horizon_features(df, key, selected):
+    cols = []
+    for name, col in selected:
+        cols.append(_logit(df[col].fillna(50).values) if name == "stat" else df[col].fillna(0).values / 10)
+    return (np.column_stack(cols) if cols else np.zeros((len(df), 0))), [n for n, _ in selected]
 
 
 def fit_horizon_models(df, split):
@@ -235,31 +267,48 @@ def fit_horizon_models(df, split):
         train, test = d[d["date"] < split], d[d["date"] >= split]
         if len(train) < 500 or len(test) < 500:
             continue
-        Xtr, names = horizon_features(train, key)
-        Xte, _ = horizon_features(test, key)
+        candidates = [("stat", f"stat_{key}")] + [(c[len(f"c{key}_"):], c) for c in sorted(d.columns) if c.startswith(f"c{key}_")]
+        selected, removed = select_factors(train, key, candidates)
+        Xtr, names = horizon_features(train, key, selected)
+        Xte, _ = horizon_features(test, key, selected)
         ytr, yte = (train[f"ret_{key}"] > 0).astype(float).values, (test[f"ret_{key}"] > 0).astype(float).values
-        w = fit_logit(Xtr, ytr)
-        p_te = 1 / (1 + np.exp(-(w[0] + Xte @ w[1:])))
         base = ytr.mean()
-        brier_model = float(((p_te - yte) ** 2).mean())
         brier_base = float(((base - yte) ** 2).mean())
-        hit = float(((p_te > 0.5) == (yte > 0.5)).mean())
-        use_model = brier_model < brier_base - MIN_BRIER_GAIN
-        if use_model:  # 通過驗證 → 用全部資料重新估計係數
-            Xall, _ = horizon_features(d, key)
+        if names:
+            w = fit_logit(Xtr, ytr)
+            p_te = 1 / (1 + np.exp(-(w[0] + Xte @ w[1:])))
+            brier_model = float(((p_te - yte) ** 2).mean())
+            hit = float(((p_te > 0.5) == (yte > 0.5)).mean())
+        else:  # 沒有任何顯著因子 → 只剩歷史上漲比例
+            w, brier_model, hit = np.array([0.0]), brier_base, float(max(yte.mean(), 1 - yte.mean()))
+        use_model = bool(names) and brier_model < brier_base - MIN_BRIER_GAIN
+        if use_model:  # 通過驗證 → 用全部資料重新估計係數 (因子組合不變)
+            Xall, _ = horizon_features(d, key, selected)
             w = fit_logit(Xall, (d[f"ret_{key}"] > 0).astype(float).values)
+        else:  # 沒通過驗證 → 所有因子都不採用
+            removed.update({n: {"r": None, "t": None, "n_eff": None, "reason": "組合未通過樣本外驗證"} for n in names})
         models[label] = {
             "mode": "model" if use_model else "base_rate",
-            "intercept": float(w[0]), "coef": {n: float(c) for n, c in zip(names, w[1:])},
+            "intercept": float(w[0]), "coef": {n: float(c) for n, c in zip(names, w[1:])} if use_model else {},
+            "removed": removed,
             "test_n": int(len(test)), "test_hit": hit, "test_always_up": float(yte.mean()),
             "test_brier": brier_model, "test_brier_base": brier_base, "split": split,
         }
         lines.append(f"| {label} | {len(test):,} | {fmt(hit)} | {fmt(yte.mean())} | {brier_model:.4f} | {brier_base:.4f} | "
                      f"{'✅ 模型' if use_model else '⛔ 改用歷史上漲比例'} |")
-    lines += ["", "各期間係數（正 = 偏多時上漲機率提高；負 = 與理論相反；接近 0 = 無效）：", ""]
+    lines += ["", f"因子篩選（訓練期，與未來報酬正相關且 t ≥ {MIN_T} 才保留；樣本期間重疊時有效樣本數打折）：", ""]
     for label, mdl in models.items():
-        top = sorted(mdl["coef"].items(), key=lambda kv: -abs(kv[1]))
-        lines.append(f"- **{label}**（{'採用' if mdl['mode'] == 'model' else '未採用'}）：" + "、".join(f"{k} {v:+.2f}" for k, v in top))
+        kept = "、".join(f"{k} {v:+.2f}" for k, v in sorted(mdl["coef"].items(), key=lambda kv: -abs(kv[1]))) or "無"
+        dropped = "、".join(f"{k}（r={v['r']:+.3f}, t={v['t']:+.1f}）" if v.get("r") is not None else f"{k}（{v['reason']}）"
+                            for k, v in mdl["removed"].items()) or "無"
+        lines += [f"- **{label}** 保留：{kept}", f"  - 篩除：{dropped}"]
+
+    # 隔天因子 (加分制，實盤權重由每日檢討校準)：一樣用訓練期檢定，篩除不顯著的因子
+    nd_cols = [(c[3:], c) for c in sorted(df.columns) if c.startswith("nd_")]
+    d1 = df.dropna(subset=["ret_1d"])
+    _, nd_removed = select_factors(d1[d1["date"] < split], "1d", nd_cols)
+    models["隔天"] = {"mode": "additive", "removed": nd_removed}
+    lines.append(f"- **隔天** 篩除：" + ("、".join(f"{k}（r={v['r']:+.3f}, t={v['t']:+.1f}）" for k, v in nd_removed.items()) or "無（全部顯著）"))
     return models, lines
 
 

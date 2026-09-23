@@ -381,10 +381,16 @@ def render_home():
         st.info("清單是空的，請在左側「➕ 新增股票」加入股票。")
         return
     with st.spinner("載入所有選股的最新行情 ..."):
-        hist = load_batch_history(codes)
+        hist = load_batch_history(codes, period="10y")
     calls = latest_model_calls()
     arrow = lambda p: "—" if p is None or pd.isna(p) else f"{'📈' if p >= 55 else '📉' if p <= 45 else '➡️'} {p:.0f}%"
-    ret = lambda s, n: float((s.iloc[-1] / s.iloc[-1 - n] - 1) * 100) if len(s) > n else np.nan
+    def ret_since(s, offset=None, month_start=False):
+        """以日曆日計算報酬：當月 = 相對上個月最後一個交易日；其他 = 相對 N 個月前最近的交易日"""
+        cutoff = s.index[-1].replace(day=1) if month_start else s.index[-1] - offset
+        past = s[s.index < cutoff] if month_start else s[s.index <= cutoff]
+        if past.empty:
+            return np.nan
+        return float((s.iloc[-1] / past.iloc[-1] - 1) * 100)
     rows = []
     for code in codes:
         s = hist.get(code)
@@ -392,8 +398,10 @@ def render_home():
             continue
         call = calls.get(code, (None, None))
         rows.append({"code": code, "分類": CODE_TO_CATEGORY[code], "股票": f"{ALL_STOCKS[code]}（{code.split('.')[0]}）",
-                     "收盤": float(s.iloc[-1]), "漲跌": float(s.iloc[-1] - s.iloc[-2]), "漲跌 %": ret(s, 1),
-                     "近 5 日 %": ret(s, 5), "近 1 月 %": ret(s, 21), "近 3 月 %": ret(s, 63),
+                     "收盤": float(s.iloc[-1]), "漲跌": float(s.iloc[-1] - s.iloc[-2]),
+                     "當日 %": float((s.iloc[-1] / s.iloc[-2] - 1) * 100), "當月 %": ret_since(s, month_start=True),
+                     "3 個月 %": ret_since(s, pd.DateOffset(months=3)), "半年 %": ret_since(s, pd.DateOffset(months=6)),
+                     "1 年 %": ret_since(s, pd.DateOffset(years=1)), "5 年 %": ret_since(s, pd.DateOffset(years=5)),
                      "近 3 月走勢": [float(v) for v in s.iloc[-63:]],
                      "隔天模型": arrow(call[0]), "1 週模型": arrow(call[1]), "資料日": s.index[-1].strftime("%m/%d")})
     if not rows:
@@ -401,29 +409,31 @@ def render_home():
         return
     table = pd.DataFrame(rows)
 
-    up, down = int((table["漲跌 %"] > 0).sum()), int((table["漲跌 %"] < 0).sum())
-    best, worst = table.loc[table["漲跌 %"].idxmax()], table.loc[table["漲跌 %"].idxmin()]
+    up, down = int((table["當日 %"] > 0).sum()), int((table["當日 %"] < 0).sum())
+    best, worst = table.loc[table["當日 %"].idxmax()], table.loc[table["當日 %"].idxmin()]
     m1, m2, m3, m4 = st.columns(4, gap="small")
     m1.metric("上漲 / 下跌 / 平盤", f"{up} / {down} / {len(table) - up - down}", delta=f"共 {len(table)} 檔", delta_color="off")
-    m2.metric("平均漲跌", f"{table['漲跌 %'].mean():+.2f}%", delta=f"近 1 月平均 {table['近 1 月 %'].mean():+.2f}%")
-    m3.metric("今日最強", best["股票"], delta=f"{best['漲跌 %']:+.2f}%")
-    m4.metric("今日最弱", worst["股票"], delta=f"{worst['漲跌 %']:+.2f}%")
+    m2.metric("平均漲跌", f"{table['當日 %'].mean():+.2f}%", delta=f"當月平均 {table['當月 %'].mean():+.2f}%")
+    m3.metric("今日最強", best["股票"], delta=f"{best['當日 %']:+.2f}%")
+    m4.metric("今日最弱", worst["股票"], delta=f"{worst['當日 %']:+.2f}%")
 
-    bar = table.sort_values("漲跌 %")
-    fig = go.Figure(go.Bar(x=bar["漲跌 %"], y=bar["股票"], orientation="h",
-                           marker_color=["#E5484D" if v > 0 else "#30A46C" if v < 0 else MUTED for v in bar["漲跌 %"]],
-                           text=[f"{v:+.2f}%" for v in bar["漲跌 %"]], textposition="outside"))
+    period = st.radio("📊 漲跌排行期間", ["當日 %", "當月 %", "3 個月 %", "半年 %", "1 年 %", "5 年 %"],
+                      horizontal=True, key="home_period", format_func=lambda c: c.replace(" %", ""))
+    bar = table.dropna(subset=[period]).sort_values(period)
+    fig = go.Figure(go.Bar(x=bar[period], y=bar["股票"], orientation="h",
+                           marker_color=["#E5484D" if v > 0 else "#30A46C" if v < 0 else MUTED for v in bar[period]],
+                           text=[f"{v:+.2f}%" for v in bar[period]], textposition="outside"))
     style_fig(fig, max(260, 28 * len(bar) + 60))
     fig.update_layout(showlegend=False, hovermode="closest", margin=dict(l=10, r=40, t=20, b=20))
     st.plotly_chart(fig, width="stretch")
 
     st.caption("紅 = 上漲、綠 = 下跌（台股慣例）。「隔天 / 1 週模型」來自每日檢討最新一次預測。👉 點選任一列可直接進入該股的個股分析。")
-    pct_cols = ["漲跌 %", "近 5 日 %", "近 1 月 %", "近 3 月 %"]
+    pct_cols = ["當日 %", "當月 %", "3 個月 %", "半年 %", "1 年 %", "5 年 %"]
     color = lambda v: f"color: {'#E5484D' if v > 0 else '#30A46C' if v < 0 else MUTED}" if pd.notna(v) else ""
     for i, (cat, g) in enumerate(table.groupby("分類", sort=False)):
         icon, cat_color = category_style(cat)
         st.html(f'<div class="cat-header" style="border-left-color:{cat_color};">{cat if cat.startswith(icon) else f"{icon} {cat}"}'
-                f'<span class="cat-count">平均 {g["漲跌 %"].mean():+.2f}%</span></div>')
+                f'<span class="cat-count">平均 {g["當日 %"].mean():+.2f}%</span></div>')
         show = g.drop(columns=["code", "分類"]).reset_index(drop=True)
         key = f"home_table_{i}"
         st.dataframe(
@@ -806,23 +816,26 @@ try:
                                                           if col in ('判讀', '加減分') and pd.notna(r['加減分']) else "" for col in r.index], axis=1)
                                         .format({"加減分": lambda v: "—" if pd.isna(v) else f"{v:+.1f}"}),
                         width="stretch", hide_index=True)
-            st.caption("紅 = 偏多、綠 = 偏空（台股慣例）。隔天與 1 週的因子權重由「📝 每日檢討」依實際命中率自動校準；"
-                       "1 個月與 1 年驗證週期長，目前採學術文獻與實務常用的經驗權重。")
+                    if c["removed"]:
+                        st.caption("🚫 已從模型篩除（與未來報酬相關性低 / 回測不顯著）：" + "、".join(dict.fromkeys(c["removed"])))
+            st.caption("紅 = 偏多、綠 = 偏空（台股慣例）。只保留經 20 年回測與實盤驗證「與未來報酬正相關且顯著」的因子；"
+                       "每週一重新檢定，失效的因子會自動移除、重新變顯著的會自動加回。")
 
-            macro_rows =[r for r in scorecards["1 年"]["table"].to_dict("records")
-                          if r["因子"] in {"通貨膨脹（美國 CPI）", "利率循環（聯邦基金利率）", "實質利率", "殖利率曲線（10 年 − 2 年）",
-                                          "貨幣供給（美國 M2）", "股債風險溢酬（Fed Model）", "美元指數", "國際油價", "新台幣匯率"}]
+            macro_names = {"通貨膨脹（美國 CPI）", "利率循環（聯邦基金利率）", "實質利率", "殖利率曲線（10 年 − 2 年）",
+                           "貨幣供給（美國 M2）", "股債風險溢酬（Fed Model）", "美元指數", "國際油價", "新台幣匯率"}
+            macro_rows = [r for r in scorecards["1 年"]["removed_rows"] if r["因子"] in macro_names]
             if macro_rows:
-                macro_sum = sum(r["加減分"] for r in macro_rows)
-                st.markdown(f"#### 🌍 總體經濟環境（合計 {macro_sum:+.1f}，{'偏多' if macro_sum > 1 else '偏空' if macro_sum < -1 else '中性'}）")
-                for r in macro_rows:
-                    icon = "🔴" if r["加減分"] > 0 else "🟢" if r["加減分"] < 0 else "⚪"
-                    st.markdown(f"- {icon} **{r['因子']}**：{r['數據']} → {r['判讀']}（{r['加減分']:+.1f}）  \n"
-                                f"  <small style='color:{MUTED}'>{r['理論依據']}</small>", unsafe_allow_html=True)
+                with st.expander("🌍 總體經濟環境（僅供參考：經 20 年回測對台股無顯著預測力，已從模型移除）"):
+                    for r in macro_rows:
+                        st.markdown(f"- **{r['因子']}**：{r['數據']}  \n  <small style='color:{MUTED}'>{r['理論依據']}</small>",
+                                    unsafe_allow_html=True)
 
         if not nextday_table.empty:
             st.markdown("#### 🌙 隔天訊號面板")
             st.dataframe(nextday_table, width="stretch", hide_index=True)
+            nd_removed = removed_nextday_factors()
+            if nd_removed:
+                st.caption("🚫 已篩除：" + "；".join(f"{FACTOR_LABELS.get(k, k)}（{v}）" for k, v in nd_removed.items()))
         if upcoming:
             st.markdown("#### 📅 未來兩週重要事件")
             for d_, text in upcoming:
@@ -1030,7 +1043,7 @@ try:
         if is_etf:
             st.subheader(f"🧺 {stock_name} 成分股分析")
             if etf_top.empty:
-                st.caption("暫時抓不到此 ETF 的持股明細。")
+                st.caption("⚠️ " + (etf_errors[0] if etf_errors else "暫時抓不到此 ETF 的持股明細。"))
             else:
                 st.caption(f"持股資料日期 {etf_date}（投信每月公布），共 {len(etf_holdings)} 檔成分股。「持股增減」為與上期相比的持股股數變化。")
                 e1, e2, e3 = st.columns(3, gap="small")
@@ -1298,7 +1311,7 @@ try:
                 {"期間": h, "採用": "✅ 回測校準模型" if hm["mode"] == "model" else "⛔ 無預測力，改用歷史上漲比例",
                  "驗證期（2016 起）命中率": f"{hm['test_hit'] * 100:.1f}%", "永遠猜漲": f"{hm['test_always_up'] * 100:.1f}%",
                  "Brier（模型 / 歷史比例）": f"{hm['test_brier']:.4f} / {hm['test_brier_base']:.4f}"}
-                for h, hm in horizon_info.items()]), width="stretch", hide_index=True)
+                for h, hm in horizon_info.items() if "test_hit" in hm]), width="stretch", hide_index=True)
         bt_report = DATA_DIR / "backtest" / "report.md"
         if bt_report.exists():
             with st.expander("📄 完整 20 年回測報告"):

@@ -43,6 +43,17 @@ SHRINK = 40            # 樣本越少，權重越接近預設 1.0
 MIN_SAMPLES_SCALE = 40  # 累積足夠驗證筆數後才校準整體機率
 BIG_MOVE = 3.0          # 單日漲跌超過 3% 視為大波動，特別檢討
 AI_MODEL = "claude-sonnet-5"
+MIN_SELECT_N = 60       # 累積這麼多筆才做顯著性檢定
+MIN_T = 2.0             # 與未來報酬正相關且 t ≥ 2 才保留
+
+
+def significance(raw, ret):
+    """相關係數與 t 值 (隔天 / 每日資料不重疊，樣本數不需打折)"""
+    x, y = np.asarray(raw, float), np.asarray(ret, float)
+    if len(x) < 3 or np.std(x) == 0 or np.std(y) == 0:
+        return 0.0, 0.0
+    r = float(np.corrcoef(x, y)[0, 1])
+    return r, float(r * np.sqrt((len(x) - 2) / max(1 - r * r, 1e-9)))
 
 # 同一次執行內，全市場資料只抓一次 (避免對證交所重複請求被限流；例外不會被快取)
 for _name in ["load_official_quotes", "load_industry_map", "load_company_names", "load_data", "load_news", "load_us_overnight",
@@ -189,7 +200,7 @@ def backfill_price_factors(stocks, years=5):
 def calibrate(preds, backfill, old, today):
     """每個因子：方向命中率越高權重越大 (0~2)；樣本少時向 1.0 收斂。整體機率縮放用 Brier 分數最小化"""
     done = preds.dropna(subset=["ret_1d"]) if not preds.empty else preds
-    stats, weights = {}, {}
+    stats, weights, removed = {}, {}, {}
     for k in FACTOR_KEYS:
         col = f"f_{k}"
         live = done[[col, "ret_1d"]].rename(columns={col: "raw"}) if col in done.columns else pd.DataFrame(columns=["raw", "ret_1d"])
@@ -204,12 +215,16 @@ def calibrate(preds, backfill, old, today):
         acc = float((np.sign(both["raw"]) == np.sign(both["ret_1d"])).mean())
         live_acc = float((np.sign(live["raw"]) == np.sign(live["ret_1d"])).mean()) if len(live) else None
         weights[k] = round(float(np.clip(1 + n / (n + SHRINK) * (acc - 0.5) * 4, 0, 2)), 2)
-        stats[k] = {"acc": round(acc, 3), "n": n, "live_n": len(live),
+        r, t = significance(both["raw"], both["ret_1d"])
+        if n >= MIN_SELECT_N and not (r > 0 and t >= MIN_T):  # 相關性低 / 不顯著 → 篩除
+            removed[k] = f"{n} 筆驗證不顯著（r={r:+.3f}, t={t:+.1f}）"
+            weights[k] = 0.0
+        stats[k] = {"acc": round(acc, 3), "n": n, "live_n": len(live), "r": round(r, 4), "t": round(t, 2),
                     "live_acc": round(live_acc, 3) if live_acc is not None else None, "weight": weights[k]}
 
     # 1 週因子：用實際 5 個交易日報酬驗證 (沒有歷史回填，純實盤累積)
     week_done = preds.dropna(subset=["ret_1w"]) if "ret_1w" in preds.columns else pd.DataFrame()
-    week_stats, week_weights = {}, {}
+    week_stats, week_weights, week_removed = {}, {}, {}
     for k in WEEK_FACTOR_KEYS:
         col = f"w_{k}"
         live = week_done[[col, "ret_1w"]] if col in week_done.columns else pd.DataFrame(columns=[col, "ret_1w"])
@@ -220,7 +235,12 @@ def calibrate(preds, backfill, old, today):
             continue
         acc = float((np.sign(live[col]) == np.sign(live["ret_1w"])).mean())
         week_weights[k] = round(float(np.clip(1 + n / (n + SHRINK) * (acc - 0.5) * 4, 0, 2)), 2)
-        week_stats[k] = {"acc": round(acc, 3), "n": n, "weight": week_weights[k]}
+        r, t = significance(live[col], live["ret_1w"])
+        t *= np.sqrt(1 / 5)  # 每天記錄、看 5 天報酬，樣本重疊 → 有效樣本約 1/5
+        if n >= MIN_SELECT_N and not (r > 0 and t >= MIN_T):
+            week_removed[k] = f"{n} 筆實盤驗證不顯著（r={r:+.3f}, t={t:+.1f}）"
+            week_weights[k] = 0.0
+        week_stats[k] = {"acc": round(acc, 3), "n": n, "r": round(r, 4), "t": round(t, 2), "weight": week_weights[k]}
 
     scale = float(old.get("scale", 1.0))
     if len(done) >= MIN_SAMPLES_SCALE:
@@ -231,6 +251,7 @@ def calibrate(preds, backfill, old, today):
         scale = round(float(min(np.arange(0.2, 1.51, 0.05), key=brier)), 2)
     return {"factors": weights, "scale": scale, "updated": today, "samples": int(len(done)),
             "factor_stats": stats, "previous_factors": old.get("factors", {}), "previous_scale": old.get("scale", 1.0),
+            "removed": removed, "week_removed": week_removed,
             "week_factors": week_weights, "week_factor_stats": week_stats, "week_samples": int(len(week_done)),
             "previous_week_factors": old.get("week_factors", {})}
 
@@ -348,7 +369,7 @@ def build_review(today, preds, weights, today_preds):
         lines.append(f"| {WEEK_FACTOR_LABELS[k]} | {pct(s['acc'])} | {s['n']} | {change} |")
     lines += ["", "### 1 週 / 1 個月 / 1 年模型（每週一以 20 年回測重新校準）", "",
               "| 期間 | 採用 | 驗證期命中率 | 永遠猜漲 | 驗證期 Brier（模型 / 歷史比例） |", "|---|---|---|---|---|"]
-    for h, hm in M.load_horizon_model().items():
+    for h, hm in [(h, hm) for h, hm in M.load_horizon_model().items() if "test_hit" in hm]:
         lines.append(f"| {h} | {'✅ 回測校準模型' if hm['mode'] == 'model' else '⛔ 模型無預測力，改用歷史上漲比例'} | "
                      f"{pct(hm['test_hit'])} | {pct(hm['test_always_up'])} | {hm['test_brier']:.4f} / {hm['test_brier_base']:.4f} |")
     lines += ["", "> 1 週因子另外以實盤 5 日報酬每日微調；1 個月與 1 年的實盤紀錄（month_p / year_p）持續累積，供每週回測比對。", ""]

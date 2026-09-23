@@ -59,6 +59,32 @@ def load_official_quotes():
                 }
         except Exception:
             continue
+    # STOCK_DAY_ALL 常晚一天更新 → 改用證交所當天下午就公布的「每日收盤行情」(MI_INDEX) 覆蓋上市股票
+    latest_twse = max((q["Date"] for c, q in quotes.items() if c.endswith(".TW")), default=pd.Timestamp("1900-01-01"))
+    today = datetime.now(TAIPEI).date()
+    for back in range(0, 5):
+        day = today - timedelta(days=back)
+        if pd.Timestamp(day) <= latest_twse:  # 已經是最新資料
+            break
+        if day.weekday() >= 5:  # 週末沒有交易
+            continue
+        try:
+            j = requests.get("https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
+                             params={"date": day.strftime("%Y%m%d"), "type": "ALLBUT0999", "response": "json"}, timeout=30).json()
+        except Exception:
+            continue
+        table = next((t for t in j.get("tables", []) if "證券代號" in t.get("fields", []) and "收盤價" in t.get("fields", [])), None)
+        if j.get("stat") != "OK" or table is None:
+            continue
+        f = table["fields"]
+        idx = {k: f.index(v) for k, v in [("code", "證券代號"), ("name", "證券名稱"), ("Open", "開盤價"), ("High", "最高價"),
+                                             ("Low", "最低價"), ("Close", "收盤價"), ("Volume", "成交股數")]}
+        for r in table["data"]:
+            code = str(r[idx["code"]]).strip()
+            if pattern.match(code):
+                quotes[code + ".TW"] = {"name": str(r[idx["name"]]).strip(), "board": "上市", "Date": pd.Timestamp(day),
+                                        **{k: _to_float(r[idx[k]]) for k in ["Open", "High", "Low", "Close", "Volume"]}}
+        break
     return quotes
 
 
@@ -218,13 +244,14 @@ def load_news(query, limit=8, days=7):
 
 
 def load_etf_holdings(code):
-    """MoneyDJ ETF 持股明細：成分股、權重、持股增減 (投信每月公布)"""
-    try:
-        resp = requests.get("https://www.moneydj.com/ETF/X/Basic/Basic0007a.xdjhtm", params={"etfid": code},
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        html = resp.content.decode("utf-8", errors="replace")  # 網頁沒標明編碼，requests 會誤判成 ISO-8859-1
-    except Exception:
-        return pd.DataFrame(), ""
+    """MoneyDJ ETF 持股明細：成分股、權重、持股增減 (投信每月公布)
+    抓取失敗時拋出例外 (不會被快取)，下次開啟頁面會重試；呼叫端負責處理"""
+    resp = requests.get("https://www.moneydj.com/ETF/X/Basic/Basic0007a.xdjhtm", params={"etfid": code},
+                        headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+    resp.raise_for_status()
+    html = resp.content.decode("utf-8", errors="replace")  # 網頁沒標明編碼，requests 會誤判成 ISO-8859-1
+    if 'id="Repeater1"' not in html:
+        raise ValueError("MoneyDJ 頁面沒有持股明細表")
     pos = html.find('id="Repeater1"')
     dates = re.findall(r"資料日期：(\d{4}/\d{2}/\d{2})", html[:pos] if pos > 0 else html)
     soup = BeautifulSoup(html, "html.parser")
@@ -929,7 +956,10 @@ def load_macro():
 
 def analyze_etf_constituents(etf_code, top_n=10):
     """ETF 前 N 大成分股：權重、持股增減、近一月漲跌、風險燈號；回傳 (全部持股, 資料日期, 前 N 大, 錯誤紀錄)"""
-    holdings, date = load_etf_holdings(etf_code)
+    try:
+        holdings, date = load_etf_holdings(etf_code)
+    except Exception as e:
+        return pd.DataFrame(), "", pd.DataFrame(), [f"持股明細暫時抓不到（{type(e).__name__}），重新整理頁面會再試一次"]
     if holdings.empty:
         return holdings, date, pd.DataFrame(), ["抓不到持股明細"]
     name_to_code = {**load_company_names(), **{n: c for c, (n, _) in load_market_list().items()}}
@@ -969,6 +999,15 @@ def load_horizon_model():
         return json.loads((DATA_DIR / "horizon_model.json").read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def removed_nextday_factors():
+    """隔天因子中已被篩除的 (代號 → 原因)：20 年回測不顯著，或實盤累積 60 筆以上仍不顯著"""
+    removed = {}
+    for k, v in load_horizon_model().get("隔天", {}).get("removed", {}).items():
+        removed[k] = f"20 年回測不顯著（r={v['r']:+.3f}, t={v['t']:+.1f}）"
+    removed.update(load_model_weights()["meta"].get("removed", {}))
+    return removed
 
 
 def load_model_weights():
@@ -1191,15 +1230,18 @@ def build_nextday_signals(code, name, d, stat_p):
         signals.append(("put_call", "⚖️ Put/Call 比", f"未平倉 {r:.0f}%（{pc[0]['date']}）",
                         "支撐偏強" if pts > 0 else "支撐偏弱" if pts < 0 else "多空均衡", pts))
 
-    # 套用每日檢討校準的權重與機率縮放
+    # 套用每日檢討校準的權重與機率縮放；已篩除的因子仍記錄原始分數 (供每週重新檢定)，但不計分、不顯示
     weights = load_model_weights()
+    removed = removed_nextday_factors()
     rows, raw_points = [], {}
     total = 0.0
     for key, label, data, text, raw in signals:
+        raw_points[key] = raw_points.get(key, 0.0) + raw
+        if key in removed:
+            continue
         w = float(weights["factors"].get(key, 1.0))
         pts = raw * w
         total += pts
-        raw_points[key] = raw_points.get(key, 0.0) + raw
         rows.append({"因子": label, "數據": data, "解讀": text, "影響": verdict(pts), "權重": round(w, 2), "加減分": round(pts, 1)})
     final_p = float(np.clip(50 + weights["scale"] * (stat_p + total - 50), 15, 85))
     return pd.DataFrame(rows), final_p, night_market + night_stock, raw_points
@@ -1272,10 +1314,15 @@ def build_horizon_scorecards(inp):
     只用數據與規則，不含主觀判斷；1 週因子權重由每日檢討依實際命中率校準。"""
     weights = load_model_weights()
     week_w = weights["meta"].get("week_factors", {})
+    week_removed = weights["meta"].get("week_removed", {})
+    removed_labels, removed_rows = {}, {}
     m = inp["macro"]
     cards = {h: [] for h in HORIZON_DAYS}
 
     def add(h, key, label, theory, data, pts, text=None):
+        if h == "1 週" and key in week_removed:  # 實盤累積後仍不顯著 → 篩除
+            removed_labels.setdefault(h, []).append(label)
+            return
         w = float(week_w.get(key, 1.0)) if h == "1 週" else 1.0
         raw = float(pts)
         if np.isnan(raw):
@@ -1416,40 +1463,41 @@ def build_horizon_scorecards(inp):
     # ── 依 20 年回測校準 (data/horizon_model.json)：通過樣本外驗證的期間用邏輯迴歸係數；
     #    沒通過的期間改用該股歷史上漲比例 (模型無預測力時，最誠實的估計) ──
     horizon_model = load_horizon_model()
+
     base_label = {}
     for h in HORIZON_DAYS:
         hm = horizon_model.get(h)
         if h == "隔天" or not hm:
             continue
         rows = cards[h]
+        dropped = [r for r in rows if hm["mode"] == "base_rate" or r["key"] in hm.get("removed", {})]
+        removed_labels.setdefault(h, []).extend(r["因子"] for r in dropped)
+        removed_rows.setdefault(h, []).extend(dropped)
+        rows = cards[h] = [r for r in rows if r not in dropped]  # 相關性低 / 不顯著的因子直接移出計算
         if hm["mode"] == "base_rate":
             br = inp.get("base_rates", {}).get(h)
             inp["stat"][h] = br * 100 if br is not None else inp["stat"].get(h, 50.0)
-            base_label[h] = (f"歷史上漲比例（此期間模型經 20 年回測無預測力，驗證期命中率 {hm['test_hit'] * 100:.1f}% "
-                             f"< 永遠猜漲 {hm['test_always_up'] * 100:.1f}%）")
-            for r in rows:
-                r["加減分"], r["判讀"] = 0.0, "回測無效，不計分"
-                r["驗證"] = "⛔ 回測無效"
+            base_label[h] = (f"歷史上漲比例（此期間經 20 年回測沒有任何顯著因子，模型無預測力；"
+                             f"驗證期永遠猜漲 {hm['test_always_up'] * 100:.1f}%）")
             continue
         coef = hm["coef"]
         terms = {}
         for r in rows:
             if r["key"] in coef:
                 terms[id(r)] = coef[r["key"]] * r["raw"] / 10
-                r["驗證"] = "✅ 回測權重"
-            else:  # 回測沒有長期資料的因子 (法人、營收…)：換算成邏輯值後半權重
+                r["驗證"] = "✅ 回測顯著"
+            else:  # 回測沒有長期資料的因子 (法人、選擇權…)：換算成邏輯值後半權重，待每日檢討累積實盤驗證
                 terms[id(r)] = r["raw"] / 25 * 0.5
                 r["驗證"] = "⚠️ 未回測（半權重）"
-        z0 = hm["intercept"] + coef.get("stat", 0) * float(np.log(np.clip(inp["stat"].get(h, 50) / 100, 0.05, 0.95)
-                                                                  / (1 - np.clip(inp["stat"].get(h, 50) / 100, 0.05, 0.95))))
+        stat_p = np.clip(inp["stat"].get(h, 50) / 100, 0.05, 0.95)
+        z0 = hm["intercept"] + coef.get("stat", 0) * float(np.log(stat_p / (1 - stat_p)))
         z = z0 + sum(terms.values())
         sig = lambda x: 1 / (1 + np.exp(-x))
         for r in rows:  # 每個因子的貢獻 = 有它與沒有它的機率差
             r["加減分"] = round(float((sig(z) - sig(z - terms[id(r)])) * 100), 1)
             r["判讀"] = "偏多" if r["加減分"] > 0.5 else "偏空" if r["加減分"] < -0.5 else "中性"
         inp["stat"][h] = float(sig(z0) * 100)
-        base_label[h] = (f"回測校準基礎（相似情境統計經 20 年回測校準；驗證期命中率 {hm['test_hit'] * 100:.1f}%，"
-                         f"永遠猜漲 {hm['test_always_up'] * 100:.1f}%）")
+        base_label[h] = (f"回測校準基礎（驗證期命中率 {hm['test_hit'] * 100:.1f}%，永遠猜漲 {hm['test_always_up'] * 100:.1f}%）")
 
     # ── 彙總：機率 → 方向 / 預估價 / 信心 ──
     result = {}
@@ -1474,6 +1522,8 @@ def build_horizon_scorecards(inp):
             "confidence": confidence, "agree": agree, "table": table,
             "points": {r["key"]: r["加減分"] for r in rows},
             "raw_points": {r["key"]: r["raw"] for r in rows},
+            "removed": removed_labels.get(h, []),
+            "removed_rows": [{k: v for k, v in r.items() if k in ("因子", "理論依據", "數據")} for r in removed_rows.get(h, [])],
         }
     return result
 
