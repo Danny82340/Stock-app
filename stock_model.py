@@ -160,6 +160,29 @@ def get_price_data(code):
     return df.sort_index()
 
 
+def load_batch_history(codes, period="6mo"):
+    """一次下載多檔股票的收盤價 (首頁一覽用)，並以交易所官方最新收盤校正；codes 需為 tuple 才能快取"""
+    try:
+        raw = yf.download(list(codes), period=period, auto_adjust=False, progress=False)["Close"]
+    except Exception:
+        return {}
+    if isinstance(raw, pd.Series):
+        raw = raw.to_frame(codes[0])
+    official = load_official_quotes()
+    result = {}
+    for code in codes:
+        if code not in raw.columns:
+            continue
+        s = raw[code].dropna()
+        q = official.get(code)
+        if q and not np.isnan(q["Close"]):
+            s.loc[q["Date"]] = q["Close"]  # 補上或覆蓋最新交易日
+            s = s.sort_index()
+        if len(s) >= 2:
+            result[code] = s
+    return result
+
+
 def _flatten(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)

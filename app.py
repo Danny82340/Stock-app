@@ -157,7 +157,7 @@ import stock_model as M
 
 # 替資料函式加上快取 (必須在 from stock_model import * 之前，才會拿到快取版本)
 _CACHE_TTL = {
-    "load_official_quotes": 600, "load_industry_map": 86400, "load_company_names": 86400, "load_news": 1800, "load_etf_holdings": 86400,
+    "load_official_quotes": 600, "load_batch_history": 300, "load_industry_map": 86400, "load_company_names": 86400, "load_news": 1800, "load_etf_holdings": 86400,
     "load_us_overnight": 900, "load_taifex_night": 900, "load_taifex_foreign_oi": 3600, "load_t86": 86400,
     "load_tpex_insti": 3600, "load_margin": 3600, "load_market_context": 1800, "load_seasonality": 86400,
     "load_long_history": 86400, "load_official_valuation": 3600, "load_yahoo_extras": 86400,
@@ -265,6 +265,8 @@ AI_PROVIDERS = {
 }
 
 # 側邊欄控制
+PAGES = ["🏠 首頁", "🔎 個股分析"]
+st.sidebar.radio("頁面", PAGES, key="page", horizontal=True, label_visibility="collapsed")
 st.sidebar.header("🎯 標的選擇系統")
 st.sidebar.caption("點一下股票即可選取（金色底 = 已選取），選取的股票才會抓資料與分析；按右邊「−」可移除。")
 
@@ -291,7 +293,9 @@ stock_code = None
 if checked_codes:
     st.sidebar.button(f"取消全部選取（目前 {len(checked_codes)} 檔）", on_click=clear_checks, width="stretch")
     st.sidebar.markdown("---")
-    stock_code = st.sidebar.selectbox("🔎 主分析標的", checked_codes, format_func=lambda c: f"{ALL_STOCKS[c]} ({c})")
+    if st.session_state.get("main_stock") not in checked_codes:  # 主分析標的被取消選取時重設
+        st.session_state.pop("main_stock", None)
+    stock_code = st.sidebar.selectbox("🔎 主分析標的", checked_codes, format_func=lambda c: f"{ALL_STOCKS[c]} ({c})", key="main_stock")
     stock_name = ALL_STOCKS[stock_code]
     category = CODE_TO_CATEGORY[stock_code]
     cat_icon, cat_color = category_style(category)
@@ -348,6 +352,91 @@ def style_fig(fig, height):
     fig.update_yaxes(gridcolor="rgba(138,150,173,0.15)")
     return fig
 
+
+# ─────────────── 首頁：所有選股的走勢漲跌一覽 ───────────────
+def go_analyze(table_key, codes):
+    """首頁表格點選某一列 → 選取該股並切換到個股分析"""
+    rows = st.session_state[table_key].selection.rows
+    if rows:
+        code = codes[rows[0]]
+        st.session_state[f"chk_{code}"] = True
+        st.session_state["main_stock"] = code
+        st.session_state["page"] = PAGES[1]
+
+
+def latest_model_calls():
+    """每日檢討最新一次的預測 (代號 → 隔天 / 1 週上漲機率)"""
+    path = DATA_DIR / "predictions.csv"
+    if not path.exists():
+        return {}
+    p = pd.read_csv(path, dtype={"code": str})
+    p = p[p["base_date"] == p["base_date"].max()]
+    return {r["code"]: (r["final_p"], r.get("week_p", np.nan)) for _, r in p.iterrows()}
+
+
+def render_home():
+    st.header("🏠 我的選股一覽")
+    codes = tuple(ALL_STOCKS)
+    if not codes:
+        st.info("清單是空的，請在左側「➕ 新增股票」加入股票。")
+        return
+    with st.spinner("載入所有選股的最新行情 ..."):
+        hist = load_batch_history(codes)
+    calls = latest_model_calls()
+    arrow = lambda p: "—" if p is None or pd.isna(p) else f"{'📈' if p >= 55 else '📉' if p <= 45 else '➡️'} {p:.0f}%"
+    ret = lambda s, n: float((s.iloc[-1] / s.iloc[-1 - n] - 1) * 100) if len(s) > n else np.nan
+    rows = []
+    for code in codes:
+        s = hist.get(code)
+        if s is None:
+            continue
+        call = calls.get(code, (None, None))
+        rows.append({"code": code, "分類": CODE_TO_CATEGORY[code], "股票": f"{ALL_STOCKS[code]}（{code.split('.')[0]}）",
+                     "收盤": float(s.iloc[-1]), "漲跌": float(s.iloc[-1] - s.iloc[-2]), "漲跌 %": ret(s, 1),
+                     "近 5 日 %": ret(s, 5), "近 1 月 %": ret(s, 21), "近 3 月 %": ret(s, 63),
+                     "近 3 月走勢": [float(v) for v in s.iloc[-63:]],
+                     "隔天模型": arrow(call[0]), "1 週模型": arrow(call[1]), "資料日": s.index[-1].strftime("%m/%d")})
+    if not rows:
+        st.warning("暫時抓不到行情資料，請稍後重新整理。")
+        return
+    table = pd.DataFrame(rows)
+
+    up, down = int((table["漲跌 %"] > 0).sum()), int((table["漲跌 %"] < 0).sum())
+    best, worst = table.loc[table["漲跌 %"].idxmax()], table.loc[table["漲跌 %"].idxmin()]
+    m1, m2, m3, m4 = st.columns(4, gap="small")
+    m1.metric("上漲 / 下跌 / 平盤", f"{up} / {down} / {len(table) - up - down}", delta=f"共 {len(table)} 檔", delta_color="off")
+    m2.metric("平均漲跌", f"{table['漲跌 %'].mean():+.2f}%", delta=f"近 1 月平均 {table['近 1 月 %'].mean():+.2f}%")
+    m3.metric("今日最強", best["股票"], delta=f"{best['漲跌 %']:+.2f}%")
+    m4.metric("今日最弱", worst["股票"], delta=f"{worst['漲跌 %']:+.2f}%")
+
+    bar = table.sort_values("漲跌 %")
+    fig = go.Figure(go.Bar(x=bar["漲跌 %"], y=bar["股票"], orientation="h",
+                           marker_color=["#E5484D" if v > 0 else "#30A46C" if v < 0 else MUTED for v in bar["漲跌 %"]],
+                           text=[f"{v:+.2f}%" for v in bar["漲跌 %"]], textposition="outside"))
+    style_fig(fig, max(260, 28 * len(bar) + 60))
+    fig.update_layout(showlegend=False, hovermode="closest", margin=dict(l=10, r=40, t=20, b=20))
+    st.plotly_chart(fig, width="stretch")
+
+    st.caption("紅 = 上漲、綠 = 下跌（台股慣例）。「隔天 / 1 週模型」來自每日檢討最新一次預測。👉 點選任一列可直接進入該股的個股分析。")
+    pct_cols = ["漲跌 %", "近 5 日 %", "近 1 月 %", "近 3 月 %"]
+    color = lambda v: f"color: {'#E5484D' if v > 0 else '#30A46C' if v < 0 else MUTED}" if pd.notna(v) else ""
+    for i, (cat, g) in enumerate(table.groupby("分類", sort=False)):
+        icon, cat_color = category_style(cat)
+        st.html(f'<div class="cat-header" style="border-left-color:{cat_color};">{cat if cat.startswith(icon) else f"{icon} {cat}"}'
+                f'<span class="cat-count">平均 {g["漲跌 %"].mean():+.2f}%</span></div>')
+        show = g.drop(columns=["code", "分類"]).reset_index(drop=True)
+        key = f"home_table_{i}"
+        st.dataframe(
+            show.style.map(color, subset=pct_cols + ["漲跌"])
+                .format({"收盤": "{:.2f}", "漲跌": "{:+.2f}", **{c: "{:+.2f}%" for c in pct_cols}}, na_rep="—"),
+            column_config={"近 3 月走勢": st.column_config.LineChartColumn("近 3 月走勢", width="medium")},
+            width="stretch", hide_index=True, key=key, on_select=lambda k=key, c=list(g["code"]): go_analyze(k, c),
+            selection_mode="single-row")
+
+
+if st.session_state.get("page", PAGES[0]) == PAGES[0]:
+    render_home()
+    st.stop()
 
 # 待機模式：沒有選取任何股票就不抓資料
 if not checked_codes:
