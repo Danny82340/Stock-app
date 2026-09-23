@@ -13,7 +13,7 @@ def note(level, msg):
 failed = False
 for code in ["2330.TW", "0050.TW"]:
     try:
-        at = AppTest.from_file("app.py", default_timeout=300)
+        at = AppTest.from_file("../app.py", default_timeout=300)
         at.session_state[f"chk_{code}"] = True
         at.run()
     except Exception:
