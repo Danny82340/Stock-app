@@ -22,3 +22,22 @@ jobs:
         run: python daily_review.py --smoke
       - name: Streamlit 畫面測試 (選取台積電，檢查有沒有錯誤)
         run: python .github/app_test.py
+      - name: 每日檢討完整流程 (暫存資料夾，跑兩次：第二次把預測日往前移兩週來測驗證 / 校準)
+        env:
+          STOCK_DATA_DIR: /tmp/stockdata
+        run: |
+          python daily_review.py > /tmp/run1.log 2>&1 || { python .github/annotate_log.py /tmp/run1.log; exit 1; }
+          python - <<'PY'
+          import pandas as pd
+          p = pd.read_csv("/tmp/stockdata/predictions.csv", dtype={"code": str})
+          p["base_date"] = (pd.to_datetime(p["base_date"]) - pd.Timedelta(days=14)).dt.date.astype(str)
+          p.to_csv("/tmp/stockdata/predictions.csv", index=False)
+          PY
+          python daily_review.py > /tmp/run2.log 2>&1 || { python .github/annotate_log.py /tmp/run2.log; exit 1; }
+          python - <<'PY'
+          import glob, json
+          report = open(sorted(glob.glob("/tmp/stockdata/reviews/*.md"))[-1], encoding="utf-8").read()
+          print("::notice::" + report.replace("%", "%25").replace("\n", "%0A")[:6000])
+          w = json.load(open("/tmp/stockdata/weights.json", encoding="utf-8"))
+          print("::notice::weights " + json.dumps(w["factors"], ensure_ascii=False) + f" scale={w['scale']} samples={w['samples']}")
+          PY

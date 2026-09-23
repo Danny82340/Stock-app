@@ -5,6 +5,7 @@ app.py 載入後會替資料函式加上 st.cache_data 快取。
 """
 import io
 import json
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -21,7 +22,7 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 
 TAIPEI = ZoneInfo("Asia/Taipei")
-DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR = Path(os.environ.get("STOCK_DATA_DIR", Path(__file__).parent / "data"))  # CI 測試時可改到暫存資料夾
 
 
 def _to_float(value):
