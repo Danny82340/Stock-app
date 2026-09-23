@@ -840,6 +840,85 @@ def upcoming_events(code, today, days=14):
     return sorted(events)
 
 
+# ─────────────── 總體經濟 (FRED 免金鑰 CSV + Yahoo) ───────────────
+def _fred(series_id):
+    txt = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv", params={"id": series_id}, timeout=30).text
+    s = pd.read_csv(io.StringIO(txt))
+    s.columns = ["date", "value"]
+    s["value"] = pd.to_numeric(s["value"], errors="coerce")
+    return s.dropna().set_index(pd.to_datetime(s.dropna()["date"]))["value"]
+
+
+def load_macro():
+    """總經數據：美國 CPI 通膨、聯邦基金利率、殖利率曲線、M2、10 年債與預期通膨、美元指數、油價、台幣"""
+    m = {}
+    try:
+        cpi = _fred("CPIAUCSL")
+        m["cpi_yoy"] = float((cpi.iloc[-1] / cpi.iloc[-13] - 1) * 100)
+        m["cpi_yoy_3m_ago"] = float((cpi.iloc[-4] / cpi.iloc[-16] - 1) * 100)
+        m["cpi_date"] = cpi.index[-1].strftime("%Y/%m")
+    except Exception:
+        pass
+    try:
+        ff = _fred("FEDFUNDS")
+        m["fed_funds"], m["fed_6m_chg"] = float(ff.iloc[-1]), float(ff.iloc[-1] - ff.iloc[-7])
+    except Exception:
+        pass
+    try:
+        curve = _fred("T10Y2Y")
+        m["curve"], m["curve_min_1y"] = float(curve.iloc[-1]), float(curve.iloc[-260:].min())
+    except Exception:
+        pass
+    try:
+        m2 = _fred("M2SL")
+        m["m2_yoy"] = float((m2.iloc[-1] / m2.iloc[-13] - 1) * 100)
+    except Exception:
+        pass
+    try:
+        m["us10y"] = float(_fred("DGS10").iloc[-1])
+        m["breakeven"] = float(_fred("T10YIE").iloc[-1])
+        m["real_rate"] = m["us10y"] - m["breakeven"]
+    except Exception:
+        pass
+    try:
+        raw = yf.download(["DX-Y.NYB", "CL=F", "TWD=X"], period="6mo", auto_adjust=False, progress=False)["Close"]
+        for sym, key in [("DX-Y.NYB", "dxy"), ("CL=F", "oil"), ("TWD=X", "usdtwd")]:
+            s = raw[sym].dropna()
+            if len(s) > 63:
+                m[key] = float(s.iloc[-1])
+                m[f"{key}_3m"] = float((s.iloc[-1] / s.iloc[-64] - 1) * 100)
+    except Exception:
+        pass
+    return m
+
+
+def analyze_etf_constituents(etf_code, top_n=10):
+    """ETF 前 N 大成分股：權重、持股增減、近一月漲跌、風險燈號；回傳 (全部持股, 資料日期, 前 N 大, 錯誤紀錄)"""
+    holdings, date = load_etf_holdings(etf_code)
+    if holdings.empty:
+        return holdings, date, pd.DataFrame(), ["抓不到持股明細"]
+    name_to_code = {**load_company_names(), **{n: c for c, (n, _) in load_market_list().items()}}
+    rows, errors = [], []
+    for _, h in holdings.head(top_n).iterrows():
+        name = str(h["成分股"]).strip()
+        code = name_to_code.get(name)
+        row = {"成分股": name, "代號": code or "—", "權重 (%)": h["權重 (%)"], "持股增減": h["持股增減"],
+               "近一月 (%)": np.nan, "燈號": "—", "主要警訊": ""}
+        if not code:
+            errors.append(f"{name}：找不到對應代號")
+        else:
+            try:
+                hd = add_indicators(get_price_data(code))
+                row["近一月 (%)"] = round(float((hd["Close"].iloc[-1] / hd["Close"].iloc[-22] - 1) * 100), 1)
+                hr = assess_risk(hd, load_long_history(code))
+                row["燈號"] = f"{hr['emoji']} {hr['level']}"
+                row["主要警訊"] = "、".join(s for _, _, s in hr["items"][:2]) or "無"
+            except Exception as e:
+                errors.append(f"{name}（{code}）：{type(e).__name__}: {e}")
+        rows.append(row)
+    return holdings, date, pd.DataFrame(rows), errors
+
+
 # ─────────────── 模型權重 (每日檢討自動校準) ───────────────
 FACTOR_LABELS = {
     "adr": "台積電 ADR", "night": "台指期夜盤", "us_index": "美股指數", "nvda": "輝達", "vix": "VIX",
@@ -1081,6 +1160,234 @@ def build_nextday_signals(code, name, d, stat_p):
         rows.append({"因子": label, "數據": data, "解讀": text, "影響": verdict(pts), "權重": round(w, 2), "加減分": round(pts, 1)})
     final_p = float(np.clip(50 + weights["scale"] * (stat_p + total - 50), 15, 85))
     return pd.DataFrame(rows), final_p, night_market + night_stock, raw_points
+
+
+# ─────────────── 多期間量化計分卡 (隔天 / 1 週 / 1 個月 / 1 年) ───────────────
+HORIZON_DAYS = {"隔天": 1, "1 週": 5, "1 個月": 21, "1 年": 252}
+
+
+def collect_model_inputs(code, name, d, adj, projection, nextday_p, nextday_points, pe_pct=np.nan, pe_hist=None):
+    """整理計分卡需要的所有數據 (app 與每日檢討共用)"""
+    last = d.iloc[-1]
+    price = float(last["Close"])
+    stock_no = code.split(".")[0]
+    inp = {"code": code, "name": name, "price": price, "nextday_p": nextday_p, "nextday_points": nextday_points,
+           "is_etf": stock_no.startswith("00")}
+    inp["sigma_1d"] = float(np.log(adj).diff().iloc[-60:].std()) if len(adj) > 60 else 0.02
+    inp["stat"] = {r["期間"]: float(r["上漲機率 (%)"]) for _, r in projection.iterrows()} if not projection.empty else {}
+    # 技術面
+    ma20 = float(d["Close"].rolling(20).mean().iloc[-1])
+    ma120 = float(d["Close"].rolling(120).mean().iloc[-1]) if len(d) >= 120 else np.nan
+    inp.update(rsi=float(last["RSI"]), k=float(last["K"]), dif=float(last["DIF"]), macd=float(last["MACD"]),
+               bb_up=float(last["BB_UP"]), bb_low=float(last["BB_LOW"]), ma20=ma20, ma60=float(last["60MA"]), ma120=ma120)
+    inp["ret_12_1"] = float((adj.iloc[-22] / adj.iloc[-253] - 1) * 100) if len(adj) > 253 else np.nan
+    inp["risk"] = assess_risk(d, adj, pe_pct)
+    # 籌碼：近 5 日法人
+    insti = load_institutional(code, list(d.index[-5:]))
+    vol5 = float(d["Volume"].iloc[-5:].sum()) if "Volume" in d.columns else np.nan
+    if insti and vol5 > 0:
+        inp["foreign_5d"] = sum(r[1] for r in insti if not np.isnan(r[1])) / vol5 * 100
+        inp["trust_5d"] = sum(r[2] for r in insti if not np.isnan(r[2])) / vol5 * 100
+    # 基本面
+    inp["revenue"] = load_monthly_revenue().get(code)
+    inp["profit"] = load_profitability().get(code)
+    ph = load_profitability_history(code)
+    inp["gross_trend"] = float(inp["profit"]["gross"] - ph.iloc[-2]["gross"]) if inp["profit"] and len(ph) >= 2 else np.nan
+    holders_now, hh = load_holders().get(stock_no), load_holders_history(stock_no)
+    if holders_now and not hh.empty:
+        prev = hh[hh["date"].astype(str) < holders_now["date"]]
+        inp["holders_chg"] = float(holders_now["big1000"] - prev.iloc[-1]["big1000"]) if not prev.empty else np.nan
+    # 估值：官方本益比 + 預估 EPS → 合理價
+    val = load_official_valuation().get(code, {})
+    inp["pe"], inp["pe_pct"] = val.get("本益比", np.nan), pe_pct
+    inp["dividend_yield"] = val.get("殖利率 (%)", np.nan)
+    extras = load_yahoo_extras(code)
+    fwd_eps = extras.get("預估 EPS（分析師共識）")
+    fair_pe = float(pe_hist.median()) if pe_hist is not None and len(pe_hist) > 20 else inp["pe"]
+    if fwd_eps and not np.isnan(fair_pe):
+        inp["fair_value"] = fwd_eps * fair_pe
+        inp["fair_gap"] = (inp["fair_value"] / price - 1) * 100
+    # 季節性
+    seas = load_seasonality(code)
+    today = datetime.now(TAIPEI).date()
+    for key, month in [("season_this", today.month), ("season_next", today.month % 12 + 1)]:
+        if not seas.empty and month in seas.index:
+            inp[key] = (float(seas.loc[month, "平均報酬 (%)"]), float(seas.loc[month, "上漲機率 (%)"]))
+    inp["macro"] = load_macro()
+    inp["events"] = upcoming_events(code, today)
+    return inp
+
+
+def build_horizon_scorecards(inp):
+    """每個期間：相似情境統計機率 + 各因子加減分 (百分點) → 上漲機率、方向、預估價、信心。
+    只用數據與規則，不含主觀判斷；1 週因子權重由每日檢討依實際命中率校準。"""
+    weights = load_model_weights()
+    week_w = weights["meta"].get("week_factors", {})
+    m = inp["macro"]
+    cards = {h: [] for h in HORIZON_DAYS}
+
+    def add(h, key, label, theory, data, pts, text=None):
+        w = float(week_w.get(key, 1.0)) if h == "1 週" else 1.0
+        raw = float(pts)
+        if np.isnan(raw):
+            return
+        pts = raw * w
+        cards[h].append({"key": key, "raw": raw, "因子": label, "理論依據": theory, "數據": data,
+                         "判讀": text or ("偏多" if pts > 0.5 else "偏空" if pts < -0.5 else "中性"), "加減分": round(pts, 1)})
+
+    # ── 隔天：沿用隔天訊號模型 ──
+    add("隔天", "nextday", "隔天訊號綜合", "美股 / ADR / 夜盤 / 法人 / 融資 / 夜間新聞，每日檢討自動校準權重",
+        f"綜合上漲機率 {inp['nextday_p']:.0f}%", inp["nextday_p"] - inp["stat"].get("隔天", 50))
+
+    # ── 1 週 ──
+    add("1 週", "carry", "隔天訊號延續", "資訊擴散理論：隔夜資訊多在 1~3 天內反映完畢，對一週影響約減半",
+        f"隔天訊號 {inp['nextday_points']:+.1f}", inp["nextday_points"] * 0.5)
+    if "foreign_5d" in inp:
+        f5, t5 = inp["foreign_5d"], inp["trust_5d"]
+        add("1 週", "flows", "法人近 5 日買賣超", "籌碼理論：法人資金大、資訊充分，買賣超具延續性",
+            f"外資 {f5:+.1f}%、投信 {t5:+.1f}%（占 5 日成交量）", np.clip(f5 * 0.3 + t5 * 0.5, -4, 4))
+    rsi = inp["rsi"]
+    add("1 週", "reversal", "短期反轉（RSI）", "短期反轉效應（Jegadeesh 1990）：短線漲跌過度後傾向修正",
+        f"RSI {rsi:.0f}", -3 if rsi > 75 else -1.5 if rsi > 70 else 3 if rsi < 25 else 1.5 if rsi < 30 else 0)
+    bb = -1.5 if inp["price"] >= inp["bb_up"] else 1.5 if inp["price"] <= inp["bb_low"] else 0
+    add("1 週", "bollinger", "布林通道位置", "均值回歸：價格偏離均值過遠後傾向回到中軌",
+        f"價格 {inp['price']:.2f}／上軌 {inp['bb_up']:.2f}／下軌 {inp['bb_low']:.2f}", bb)
+    pc = load_put_call()
+    if pc and not np.isnan(pc[0]["oi_ratio"]):
+        r = pc[0]["oi_ratio"]
+        add("1 週", "sentiment", "選擇權 Put/Call 比", "逆向情緒指標：賣權未平倉高代表支撐強、市場過度悲觀",
+            f"未平倉 P/C {r:.0f}%", 1.5 if r > 120 else -1.5 if r < 80 else 0)
+
+    # ── 1 個月 ──
+    p, ma20, ma60 = inp["price"], inp["ma20"], inp["ma60"]
+    trend = 4 if p > ma20 > ma60 else -4 if p < ma20 < ma60 else 1 if p > ma60 else -1
+    add("1 個月", "trend", "均線趨勢", "趨勢跟隨（道氏理論）：多頭排列時中期上漲機率較高",
+        f"價格 {p:.2f}／20MA {ma20:.2f}／60MA {ma60:.2f}", trend,
+        "多頭排列" if trend == 4 else "空頭排列" if trend == -4 else "季線之上" if trend > 0 else "季線之下")
+    macd_pts = 2 if inp["dif"] > 0 and inp["dif"] > inp["macd"] else -2 if inp["dif"] < 0 and inp["dif"] < inp["macd"] else 0
+    add("1 個月", "macd", "MACD 動能", "動能指標：DIF 在零軸之上且高於訊號線代表中期動能偏多",
+        f"DIF {inp['dif']:.2f}／訊號線 {inp['macd']:.2f}", macd_pts)
+    rev = inp.get("revenue")
+    if rev and not np.isnan(rev["yoy"]):
+        y = rev["yoy"]
+        add("1 個月", "revenue", "月營收年增率", "盈餘動能 / 盈餘宣告後漂移（PEAD）：營收成長的利多通常持續反映數週",
+            f"{rev['month']} 年增 {y:+.1f}%", 4 if y > 30 else 2 if y > 10 else -4 if y < -10 else -1 if y < 0 else 0)
+    if "season_this" in inp:
+        avg, win = inp["season_this"]
+        add("1 個月", "season", "月份效應", "季節效應：除權息、財報、作帳行情造成的月份規律",
+            f"本月歷史平均 {avg:+.2f}%、上漲機率 {win:.0f}%", np.clip((win - 50) / 5, -3, 3))
+    if not np.isnan(inp.get("holders_chg", np.nan)):
+        hc = inp["holders_chg"]
+        add("1 個月", "holders", "千張大戶週變化", "籌碼集中度：大戶增加、散戶減少通常有利中期走勢",
+            f"{hc:+.2f} 個百分點", 2 if hc > 0.3 else -2 if hc < -0.3 else 0)
+    risk = inp["risk"]
+    add("1 個月", "risk", "風險燈號", "多指標風險：過熱與轉弱訊號越多，中期回檔機率越高",
+        f"{risk['emoji']} {risk['level']}（{risk['score']} 分）", float(np.clip(-(risk["score"] - 1), -5, 1)))
+
+    # ── 1 年 ──
+    if not np.isnan(inp.get("pe_pct", np.nan)):
+        pp = inp["pe_pct"]
+        add("1 年", "pe_pct", "本益比歷史位階", "價值投資 / 估值均值回歸：本益比在歷史高檔時，未來長期報酬較低",
+            f"近一年 {pp:.0f} 百分位", 6 if pp < 25 else 2 if pp < 50 else -6 if pp > 75 else -2)
+    if "fair_gap" in inp:
+        g = inp["fair_gap"]
+        add("1 年", "fair_value", "合理價缺口", "盈餘折現：預估 EPS × 合理本益比推算合理價，價格終將向價值收斂",
+            f"合理價 {inp['fair_value']:.2f}（{g:+.1f}%）", np.clip(g / 3, -8, 8))
+    if rev and not np.isnan(rev.get("cum_yoy", np.nan)):
+        cy = rev["cum_yoy"]
+        add("1 年", "growth", "營收成長（今年累計）", "成長因子：營收與獲利成長是長期股價的核心驅動",
+            f"累計年增 {cy:+.1f}%", 5 if cy > 20 else 2 if cy > 5 else -5 if cy < 0 else 0)
+    prof = inp.get("profit")
+    if prof and not np.isnan(prof["gross"]):
+        gpts = 2 if prof["gross"] > 40 else -1 if prof["gross"] < 10 else 0
+        gt = inp.get("gross_trend", np.nan)
+        if not np.isnan(gt):
+            gpts += 1.5 if gt > 1 else -1.5 if gt < -1 else 0
+        add("1 年", "quality", "毛利率（品質）", "品質因子（Novy-Marx 2013）：高毛利、毛利率改善的公司長期報酬較佳",
+            f"{prof['quarter']} 毛利率 {prof['gross']:.1f}%" + (f"（較上季 {gt:+.1f}）" if not np.isnan(gt) else ""), gpts)
+    if not np.isnan(inp.get("ret_12_1", np.nan)):
+        mo = inp["ret_12_1"]
+        add("1 年", "momentum", "12-1 月動能", "動能效應（Jegadeesh & Titman 1993）：過去 12 個月（排除最近 1 個月）強勢股傾向延續",
+            f"{mo:+.1f}%", 3 if mo > 20 else -3 if mo < -20 else 0)
+
+    # ── 總經 (1 年全權重；1 個月半權重) ──
+    macro_rows = []
+    if "cpi_yoy" in m:
+        c = m["cpi_yoy"]
+        pts = -3 if c < 0 else 2 if c <= 3 else -1 if c <= 5 else -4
+        macro_rows.append(("inflation", "通貨膨脹（美國 CPI）",
+                           "通膨理論：溫和通膨（1~3%）帶動名目營收與獲利成長，股票是抗通膨資產；通膨過高引發升息、壓抑估值；通縮代表需求疲弱",
+                           f"{m['cpi_date']} 年增 {c:.1f}%（3 個月前 {m['cpi_yoy_3m_ago']:.1f}%）", pts))
+    if "fed_6m_chg" in m:
+        ch = m["fed_6m_chg"]
+        macro_rows.append(("rates", "利率循環（聯邦基金利率）",
+                           "股利折現模型：降息使折現率下降、資金成本降低，推升估值；升息則相反",
+                           f"{m['fed_funds']:.2f}%（近 6 個月 {ch:+.2f}）", 3 if ch <= -0.25 else -3 if ch >= 0.25 else 0))
+    if "real_rate" in m:
+        rr = m["real_rate"]
+        macro_rows.append(("real_rate", "實質利率",
+                           "實質利率 = 10 年債殖利率 − 預期通膨；實質利率越高，成長股與高本益比股票的估值壓力越大",
+                           f"{rr:.2f}%（10 年債 {m['us10y']:.2f}% − 預期通膨 {m['breakeven']:.2f}%）", -2 if rr > 2 else 1 if rr < 1 else 0))
+    if "curve" in m:
+        cv = m["curve"]
+        macro_rows.append(("curve", "殖利率曲線（10 年 − 2 年）",
+                           "殖利率曲線倒掛是經濟衰退的領先指標；剛解除倒掛時歷史上衰退風險仍高",
+                           f"{cv:+.2f}%（一年內最低 {m['curve_min_1y']:+.2f}%）",
+                           -3 if cv < 0 else -1 if m["curve_min_1y"] < 0 else 1))
+    if "m2_yoy" in m:
+        mm = m["m2_yoy"]
+        macro_rows.append(("liquidity", "貨幣供給（美國 M2）",
+                           "貨幣數量學說 / 流動性理論：資金寬鬆推升資產價格，貨幣緊縮則相反",
+                           f"年增 {mm:+.1f}%", 2 if mm > 5 else -2 if mm < 0 else 0))
+    if "real_rate" in m and not np.isnan(inp.get("pe", np.nan)) and inp["pe"] > 0:
+        erp = 100 / inp["pe"] - m["us10y"]
+        macro_rows.append(("erp", "股債風險溢酬（Fed Model）",
+                           "股票盈餘殖利率（1 ÷ 本益比）高於公債殖利率越多，股票相對越有吸引力",
+                           f"盈餘殖利率 {100 / inp['pe']:.2f}% − 10 年債 {m['us10y']:.2f}% = {erp:+.2f}%", 2 if erp > 2 else -3 if erp < 0 else 0))
+    if "dxy_3m" in m:
+        dx = m["dxy_3m"]
+        macro_rows.append(("dollar", "美元指數",
+                           "美元走強時全球資金回流美國，新興市場（含台股）承壓；美元走弱則資金外溢",
+                           f"{m['dxy']:.1f}（近 3 個月 {dx:+.1f}%）", -2 if dx > 3 else 2 if dx < -3 else 0))
+    if "oil_3m" in m:
+        oi = m["oil_3m"]
+        macro_rows.append(("oil", "國際油價",
+                           "油價大漲推升成本型通膨、壓縮企業利潤，也提高升息風險",
+                           f"{m['oil']:.1f} 美元（近 3 個月 {oi:+.1f}%）", -1.5 if oi > 20 else 1 if oi < -20 else 0))
+    if "usdtwd_3m" in m:
+        tw = m["usdtwd_3m"]
+        macro_rows.append(("twd", "新台幣匯率",
+                           "台幣升值通常代表外資匯入，有利台股資金面；貶值代表資金外流",
+                           f"美元兌台幣 {m['usdtwd']:.2f}（近 3 個月 {tw:+.1f}%）", 1.5 if tw < -2 else -1.5 if tw > 2 else 0))
+    for key, label, theory, data, pts in macro_rows:
+        add("1 年", key, label, theory, data, pts)
+        add("1 個月", key, label, theory + "（中期影響較小，半權重）", data, pts * 0.5)
+
+    # ── 彙總：機率 → 方向 / 預估價 / 信心 ──
+    result = {}
+    for h, days in HORIZON_DAYS.items():
+        rows = cards[h]
+        base = inp["stat"].get(h, 50.0)
+        total = sum(r["加減分"] for r in rows)
+        prob = float(np.clip(base + total, 10, 90))
+        sigma = inp["sigma_1d"] * np.sqrt(days)
+        mu = sigma * NormalDist().inv_cdf(prob / 100)
+        signed = [r["加減分"] for r in rows if abs(r["加減分"]) > 0.5]
+        agree = (sum(1 for x in signed if np.sign(x) == np.sign(prob - 50)) / len(signed)) if signed and prob != 50 else 0.5
+        edge = abs(prob - 50)
+        confidence = "高" if edge >= 15 and agree >= 0.65 else "中" if edge >= 7 and agree >= 0.5 else "低"
+        table = pd.DataFrame([{"因子": "📊 相似情境統計", "理論依據": "歷史統計：過去相同乖離位階與趨勢下的實際漲跌機率（已換成合理基準成長）",
+                               "數據": f"上漲機率 {base:.0f}%", "判讀": "基礎機率", "加減分": np.nan}]
+                             + [{k: v for k, v in r.items() if k not in ("key", "raw")} for r in rows])
+        result[h] = {
+            "prob": prob, "base": base, "total": total,
+            "direction": "📈 上漲" if prob >= 55 else "📉 下跌" if prob <= 45 else "➡️ 盤整",
+            "price": inp["price"] * np.exp(mu), "low": inp["price"] * np.exp(mu - sigma), "high": inp["price"] * np.exp(mu + sigma),
+            "confidence": confidence, "agree": agree, "table": table,
+            "points": {r["key"]: r["加減分"] for r in rows},
+            "raw_points": {r["key"]: r["raw"] for r in rows},
+        }
+    return result
 
 
 def ask_ai(provider, key, model, prompt, max_tokens=1500):

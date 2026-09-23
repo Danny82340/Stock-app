@@ -22,7 +22,7 @@ for code in ["2330.TW", "0050.TW"]:
         continue
     errors = [e.value for e in at.error]
     exceptions = [f"{e.message}\n{''.join(e.stack_trace) if e.stack_trace else ''}" for e in at.exception]
-    metrics = "; ".join(f"{m.label}={m.value}" for m in at.metric[:14])
+    metrics = "; ".join(f"{m.label}={m.value}" for m in at.metric[:40])
     note("notice", f"{code}: {len(at.metric)} 指標, {len(at.dataframe)} 表格, {len(at.tabs)} 分頁 | {metrics}")
     for d in at.dataframe:
         try:

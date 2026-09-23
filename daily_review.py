@@ -35,6 +35,10 @@ WEIGHTS_FILE = M.DATA_DIR / "weights.json"
 REVIEW_DIR = M.DATA_DIR / "reviews"
 CONTEXT_DIR = M.DATA_DIR / "contexts"
 FACTOR_KEYS = list(M.FACTOR_LABELS)
+# 1 週計分卡中可用實際一週報酬校準的因子 (統計基礎另計)
+WEEK_FACTOR_LABELS = {"carry": "隔天訊號延續", "flows": "法人近 5 日買賣超", "reversal": "短期反轉（RSI）",
+                      "bollinger": "布林通道位置", "sentiment": "選擇權 Put/Call 比"}
+WEEK_FACTOR_KEYS = list(WEEK_FACTOR_LABELS)
 SHRINK = 40            # 樣本越少，權重越接近預設 1.0
 MIN_SAMPLES_SCALE = 40  # 累積足夠驗證筆數後才校準整體機率
 BIG_MOVE = 3.0          # 單日漲跌超過 3% 視為大波動，特別檢討
@@ -44,7 +48,8 @@ AI_MODEL = "claude-sonnet-5"
 for _name in ["load_official_quotes", "load_industry_map", "load_company_names", "load_data", "load_news", "load_us_overnight",
               "load_taifex_night", "load_taifex_foreign_oi", "load_t86", "load_tpex_insti", "load_margin",
               "load_long_history", "load_monthly_revenue", "load_profitability", "load_holders", "load_sbl",
-              "load_put_call", "load_dividend_calendar", "load_us_earnings"]:
+              "load_put_call", "load_dividend_calendar", "load_us_earnings", "load_macro", "load_etf_holdings",
+              "load_seasonality", "load_official_valuation", "load_yahoo_extras"]:
     setattr(M, _name, functools.lru_cache(maxsize=None)(getattr(M, _name)))
 
 
@@ -73,16 +78,24 @@ def predict_stock(code, name):
     day, week = horizon("隔天"), horizon("1 週")
     stat_p = float(day["上漲機率 (%)"]) if day is not None else 50.0
     table, final_p, news, raw = M.build_nextday_signals(code, name, df, stat_p)
+    nextday_points = float(table["加減分"].sum()) if not table.empty else 0.0
+    inp = M.collect_model_inputs(code, name, df, adj, proj, final_p, nextday_points)
+    cards = M.build_horizon_scorecards(inp)
     rec = {
         "made_at": datetime.now(M.TAIPEI).isoformat(timespec="minutes"),
         "base_date": df.index[-1].date().isoformat(), "code": code, "name": name,
         "base_close": round(price, 2), "stat_p": round(stat_p, 1), "final_p": round(final_p, 1),
-        "week_p": round(float(week["上漲機率 (%)"]), 1) if week is not None else np.nan,
-        "week_median": round(float(week["中位數"]), 2) if week is not None else np.nan,
+        "week_stat_p": round(float(week["上漲機率 (%)"]), 1) if week is not None else np.nan,
+        "week_p": round(cards["1 週"]["prob"], 1), "week_price": round(cards["1 週"]["price"], 2),
+        "month_p": round(cards["1 個月"]["prob"], 1), "year_p": round(cards["1 年"]["prob"], 1),
     }
     for k in FACTOR_KEYS:
         rec[f"f_{k}"] = round(raw.get(k, 0.0), 2)
-    context = {"signals": table.to_dict("records"), "news": [n["title"] for n in news[:8]]}
+    for k in WEEK_FACTOR_KEYS:
+        rec[f"w_{k}"] = round(cards["1 週"]["raw_points"].get(k, 0.0), 2)
+    context = {"signals": table.to_dict("records"), "news": [n["title"] for n in news[:8]],
+               "verdicts": {h: {"prob": round(c["prob"], 1), "direction": c["direction"], "confidence": c["confidence"]}
+                            for h, c in cards.items()}}
     return rec, context
 
 
@@ -194,6 +207,21 @@ def calibrate(preds, backfill, old, today):
         stats[k] = {"acc": round(acc, 3), "n": n, "live_n": len(live),
                     "live_acc": round(live_acc, 3) if live_acc is not None else None, "weight": weights[k]}
 
+    # 1 週因子：用實際 5 個交易日報酬驗證 (沒有歷史回填，純實盤累積)
+    week_done = preds.dropna(subset=["ret_1w"]) if "ret_1w" in preds.columns else pd.DataFrame()
+    week_stats, week_weights = {}, {}
+    for k in WEEK_FACTOR_KEYS:
+        col = f"w_{k}"
+        live = week_done[[col, "ret_1w"]] if col in week_done.columns else pd.DataFrame(columns=[col, "ret_1w"])
+        live = live[(live[col] != 0) & (live["ret_1w"] != 0)]
+        n = len(live)
+        if n == 0:
+            week_weights[k], week_stats[k] = 1.0, {"acc": None, "n": 0, "weight": 1.0}
+            continue
+        acc = float((np.sign(live[col]) == np.sign(live["ret_1w"])).mean())
+        week_weights[k] = round(float(np.clip(1 + n / (n + SHRINK) * (acc - 0.5) * 4, 0, 2)), 2)
+        week_stats[k] = {"acc": round(acc, 3), "n": n, "weight": week_weights[k]}
+
     scale = float(old.get("scale", 1.0))
     if len(done) >= MIN_SAMPLES_SCALE:
         raw_total = sum(done[f"f_{k}"].fillna(0) * weights[k] for k in FACTOR_KEYS if f"f_{k}" in done.columns)
@@ -202,7 +230,9 @@ def calibrate(preds, backfill, old, today):
         brier = lambda s: float(((((50 + s * (p_unscaled - 50)).clip(15, 85)) / 100 - y) ** 2).mean())
         scale = round(float(min(np.arange(0.2, 1.51, 0.05), key=brier)), 2)
     return {"factors": weights, "scale": scale, "updated": today, "samples": int(len(done)),
-            "factor_stats": stats, "previous_factors": old.get("factors", {}), "previous_scale": old.get("scale", 1.0)}
+            "factor_stats": stats, "previous_factors": old.get("factors", {}), "previous_scale": old.get("scale", 1.0),
+            "week_factors": week_weights, "week_factor_stats": week_stats, "week_samples": int(len(week_done)),
+            "previous_week_factors": old.get("week_factors", {})}
 
 
 # ─────────────── 快照 ───────────────
@@ -262,7 +292,8 @@ def build_review(today, preds, weights, today_preds):
         ("隔天：近 20 個交易日", done[done["target_date"].isin(recent_dates)], "final_p", "ret_1d"),
         ("隔天：全部", done, "final_p", "ret_1d"),
         ("隔天：只用統計（對照）", done, "stat_p", "ret_1d"),
-        ("1 週：全部", preds, "week_p", "ret_1w"),
+        ("1 週：模型", preds, "week_p", "ret_1w"),
+        ("1 週：只用統計（對照）", preds, "week_stat_p", "ret_1w"),
     ]:
         s = hit_stats(subset, p_col, r_col) if not subset.empty else None
         if s:
@@ -309,10 +340,21 @@ def build_review(today, preds, weights, today_preds):
               "> 權重規則：命中率 50% = 1.0（維持），60% ≈ 1.4，40% ≈ 0.6，命中率越差越接近 0（等於停用）；"
               f"樣本越少越接近 1.0（收斂參數 {SHRINK}）。", ""]
 
+    lines += ["### 1 週計分卡因子（以實際 5 個交易日報酬驗證）", "", "| 因子 | 命中率 | 樣本 | 權重 |", "|---|---|---|---|"]
+    prev_w = weights.get("previous_week_factors", {})
+    for k, s in weights.get("week_factor_stats", {}).items():
+        old_w = prev_w.get(k, 1.0)
+        change = f"{old_w:.2f} → **{s['weight']:.2f}**" if abs(old_w - s["weight"]) >= 0.01 else f"{s['weight']:.2f}"
+        lines.append(f"| {WEEK_FACTOR_LABELS[k]} | {pct(s['acc'])} | {s['n']} | {change} |")
+    lines += ["", "> 1 個月與 1 年的判斷驗證週期長，先累積紀錄（month_p / year_p），資料足夠後再納入校準。", ""]
+
     # 6. 今日預測
-    lines += ["## 6. 今日預測（台股開盤前）", "", "| 股票 | 隔天上漲機率 | 統計基礎 | 1 週上漲機率 | 1 週中位數 |", "|---|---|---|---|---|"]
+    lines += ["## 6. 今日預測（台股開盤前，模型量化判斷）", "",
+              "| 股票 | 隔天 | 1 週 | 1 個月 | 1 年 | 隔天統計基礎 |", "|---|---|---|---|---|---|"]
+    arrow = lambda p: "📈" if p >= 55 else "📉" if p <= 45 else "➡️"
     for r in today_preds:
-        lines.append(f"| {r['name']}（{r['code']}） | **{r['final_p']:.0f}%** | {r['stat_p']:.0f}% | {r['week_p']:.0f}% | {r['week_median']:.2f} |")
+        cells = " | ".join(f"{arrow(r[c])} {r[c]:.0f}%" for c in ("final_p", "week_p", "month_p", "year_p"))
+        lines.append(f"| {r['name']}（{r['code']}） | {cells} | {r['stat_p']:.0f}% |")
     return "\n".join(lines)
 
 
@@ -351,6 +393,12 @@ def main():
             print(json.dumps(rec, ensure_ascii=False, default=str))
             print(pd.DataFrame(ctx["signals"]).to_string() if ctx else "no context")
             print(M.upcoming_events(code, datetime.now(M.TAIPEI).date()))
+        holdings, date, top, errors = M.analyze_etf_constituents("0050.TW")
+        print(f"::notice::0050 成分股 ({date})%0A" + top.to_string().replace("\n", "%0A") + "%0A錯誤：" + "；".join(errors))
+        print("::notice::總經 " + json.dumps(M.load_macro(), ensure_ascii=False, default=str))
+        rec, ctx = predict_stock("2330.TW", "台積電")
+        print("::notice::台積電模型判斷 " + json.dumps(ctx["verdicts"], ensure_ascii=False)
+              + f" 1週原始因子 {json.dumps({k: rec[f'w_{k}'] for k in WEEK_FACTOR_KEYS})}")
         print("revenue:", M.load_monthly_revenue().get("2330.TW"))
         print("profit:", M.load_profitability().get("2330.TW"))
         print("holders:", M.load_holders().get("2330"))

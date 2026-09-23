@@ -162,7 +162,7 @@ _CACHE_TTL = {
     "load_tpex_insti": 3600, "load_margin": 3600, "load_market_context": 1800, "load_seasonality": 86400,
     "load_long_history": 86400, "load_official_valuation": 3600, "load_yahoo_extras": 86400,
     "load_monthly_revenue": 21600, "load_profitability": 86400, "load_holders": 21600, "load_sbl": 3600,
-    "load_put_call": 3600, "load_dividend_calendar": 21600, "load_us_earnings": 86400,
+    "load_put_call": 3600, "load_dividend_calendar": 21600, "load_us_earnings": 86400, "load_macro": 43200,
 }
 if not getattr(M, "_streamlit_cached", False):  # Streamlit 每次重跑都會執行這裡，只能包一次
     for _name, _ttl in _CACHE_TTL.items():
@@ -448,27 +448,10 @@ try:
 
     # ETF 成分股分析：前 10 大成分股的表現、風險燈號與持股增減
     is_etf = stock_code.split('.')[0].startswith("00")
-    etf_holdings, etf_date, etf_top, etf_summary = pd.DataFrame(), "", pd.DataFrame(), ""
+    etf_holdings, etf_date, etf_top, etf_summary, etf_errors = pd.DataFrame(), "", pd.DataFrame(), "", []
     if is_etf:
-        etf_holdings, etf_date = load_etf_holdings(stock_code)
-    if not etf_holdings.empty:
-        name_to_code = {**load_company_names(), **{name: code for code, (name, _) in MARKET.items()}}
-        top_rows = []
-        for _, h in etf_holdings.head(10).iterrows():
-            code = name_to_code.get(h["成分股"])
-            row = {"成分股": h["成分股"], "權重 (%)": h["權重 (%)"], "持股增減": h["持股增減"],
-                   "近一月 (%)": np.nan, "燈號": "—", "主要警訊": ""}
-            if code:
-                try:
-                    hd = add_indicators(get_price_data(code))
-                    row["近一月 (%)"] = round(float((hd['Close'].iloc[-1] / hd['Close'].iloc[-22] - 1) * 100), 1)
-                    hr = assess_risk(hd, load_long_history(code))
-                    row["燈號"] = f"{hr['emoji']} {hr['level']}"
-                    row["主要警訊"] = "、".join(s for _, _, s in hr["items"][:2]) or "無"
-                except Exception:
-                    pass
-            top_rows.append(row)
-        etf_top = pd.DataFrame(top_rows)
+        etf_holdings, etf_date, etf_top, etf_errors = analyze_etf_constituents(stock_code)
+    if not etf_top.empty:
         weights = etf_top["權重 (%)"].fillna(0)
         contrib = (weights * etf_top["近一月 (%)"].fillna(0) / 100).sum()
         risky_weight = weights[etf_top["燈號"].str.contains("警戒|高風險")].sum()
@@ -518,6 +501,17 @@ try:
         nextday_table, nextday_p, night_news, _ = build_nextday_signals(stock_code, stock_name, df, stat_p_1d)
     except Exception:
         nextday_table, nextday_p, night_news = pd.DataFrame(), stat_p_1d, []
+
+    # 多期間量化計分卡 (隔天 / 1 週 / 1 個月 / 1 年)：統計 + 技術 + 籌碼 + 基本面 + 估值 + 總經理論
+    scorecards, model_inputs = {}, {}
+    if not projection.empty:
+        try:
+            nextday_points = float(nextday_table["加減分"].sum()) if not nextday_table.empty else 0.0
+            model_inputs = collect_model_inputs(stock_code, stock_name, df, long_adj, projection, nextday_p, nextday_points,
+                                                pe_pct=pe_pct, pe_hist=pe_hist if len(pe_hist) else None)
+            scorecards = build_horizon_scorecards(model_inputs)
+        except Exception as e:
+            st.warning(f"量化計分卡計算失敗：{e}")
     history_years = len(long_adj) / 252
 
     levels = {
@@ -618,6 +612,13 @@ try:
                             f"50 張以下散戶 {holders_now['retail']:.2f}%，股東 {holders_now['people']:,.0f} 人")
     upcoming = upcoming_events(stock_code, today.date())
 
+    model_block = ""
+    for h, c in scorecards.items():
+        top = sorted(c["table"].dropna(subset=["加減分"]).to_dict("records"), key=lambda r: -abs(r["加減分"]))[:5]
+        top_text = "、".join("{} {:+.1f}".format(r["因子"], r["加減分"]) for r in top)
+        model_block += (f"- {h}：{c['direction']}，上漲機率 {c['prob']:.0f}%（基礎 {c['base']:.0f}% ＋ 因子 {c['total']:+.1f}），"
+                        f"預估價 {c['price']:.2f}（±1σ {c['low']:.2f} ~ {c['high']:.2f}），信心 {c['confidence']}；主要因子：{top_text}\n")
+
     etf_block = ""
     if is_etf:
         etf_block = (f"【ETF 成分股分析】\n{etf_summary or '（抓不到持股明細）'}\n"
@@ -660,6 +661,8 @@ try:
 {season_text()}
 
 {etf_block}
+【模型量化判斷（計分卡，已整合統計、技術、籌碼、基本面、估值與總經理論；AI 不可推翻）】
+{model_block or "（無資料）"}
 【隔天訊號（台股收盤後的國際行情與籌碼）】統計機率 {stat_p_1d:.0f}% → 綜合上漲機率 {nextday_p:.0f}%
 {nextday_table.to_string(index=False) if not nextday_table.empty else "（無資料）"}
 
@@ -687,7 +690,56 @@ try:
 
     # ── 未來走勢預估 (量化部分；AI 預估在最後補上) ──
     with tab_forecast:
-        st.subheader(f"🔮 {stock_name} 未來 1 週 / 1 個月 / 1 年價格預估")
+        st.subheader(f"🔮 {stock_name} 模型量化判斷")
+        if scorecards:
+            v_cols = st.columns(4, gap="small")
+            for col, (h, c) in zip(v_cols, scorecards.items()):
+                chg = (c["price"] / current_price - 1) * 100
+                col.metric(f"{h}（信心：{c['confidence']}）", f"{c['direction']} {c['prob']:.0f}%",
+                           delta=f"{chg:+.2f}% → {c['price']:.2f}")
+                col.caption(f"±1σ 區間 {c['low']:.2f} ~ {c['high']:.2f}｜因子一致性 {c['agree'] * 100:.0f}%")
+            st.caption("方向與機率完全由下方計分卡計算：相似情境統計機率 + 各因子加減分（百分點）。"
+                       "上漲機率 ≥55% 判定上漲、≤45% 判定下跌；信心依機率偏離 50% 的程度與因子方向一致性決定。"
+                       "不含人工或 AI 的主觀調整。")
+
+            st.markdown("#### 🧮 各期間計分卡")
+            h_tabs = st.tabs([f"{h}：{c['direction']} {c['prob']:.0f}%" for h, c in scorecards.items()])
+            for h_tab, (h, c) in zip(h_tabs, scorecards.items()):
+                with h_tab:
+                    st.markdown(f"**{h}**：基礎機率 {c['base']:.0f}% ＋ 因子合計 {c['total']:+.1f} ＝ **上漲機率 {c['prob']:.0f}%**")
+                    st.dataframe(
+                        c["table"].style.apply(lambda r: [f"color: {'#E5484D' if r['加減分'] > 0 else '#30A46C' if r['加減分'] < 0 else MUTED}"
+                                                          if col in ('判讀', '加減分') and pd.notna(r['加減分']) else "" for col in r.index], axis=1)
+                                        .format({"加減分": lambda v: "—" if pd.isna(v) else f"{v:+.1f}"}),
+                        use_container_width=True, hide_index=True)
+            st.caption("紅 = 偏多、綠 = 偏空（台股慣例）。隔天與 1 週的因子權重由「📝 每日檢討」依實際命中率自動校準；"
+                       "1 個月與 1 年驗證週期長，目前採學術文獻與實務常用的經驗權重。")
+
+            macro_rows =[r for r in scorecards["1 年"]["table"].to_dict("records")
+                          if r["因子"] in {"通貨膨脹（美國 CPI）", "利率循環（聯邦基金利率）", "實質利率", "殖利率曲線（10 年 − 2 年）",
+                                          "貨幣供給（美國 M2）", "股債風險溢酬（Fed Model）", "美元指數", "國際油價", "新台幣匯率"}]
+            if macro_rows:
+                macro_sum = sum(r["加減分"] for r in macro_rows)
+                st.markdown(f"#### 🌍 總體經濟環境（合計 {macro_sum:+.1f}，{'偏多' if macro_sum > 1 else '偏空' if macro_sum < -1 else '中性'}）")
+                for r in macro_rows:
+                    icon = "🔴" if r["加減分"] > 0 else "🟢" if r["加減分"] < 0 else "⚪"
+                    st.markdown(f"- {icon} **{r['因子']}**：{r['數據']} → {r['判讀']}（{r['加減分']:+.1f}）  \n"
+                                f"  <small style='color:{MUTED}'>{r['理論依據']}</small>", unsafe_allow_html=True)
+
+        if not nextday_table.empty:
+            st.markdown("#### 🌙 隔天訊號面板")
+            st.dataframe(nextday_table, use_container_width=True, hide_index=True)
+        if upcoming:
+            st.markdown("#### 📅 未來兩週重要事件")
+            for d_, text in upcoming:
+                st.markdown(f"- **{d_:%m/%d}（{'一二三四五六日'[d_.weekday()]}）** {text}")
+        if fundamentals:
+            st.markdown("#### 🏭 基本面與籌碼")
+            for f in fundamentals:
+                st.markdown(f"- {f}")
+
+        st.markdown("---")
+        st.markdown("#### 📊 統計區間與價位參考")
         st.caption("以下為統計推估的「可能區間」，不是保證會到的價位，僅供參考。")
 
         if projection.empty:
@@ -895,6 +947,8 @@ try:
                           delta="成分股轉弱" if risky_weight >= 20 else "成分股大致穩定",
                           delta_color="inverse" if risky_weight >= 20 else "off")
                 st.dataframe(etf_top, use_container_width=True, hide_index=True)
+                if etf_errors:
+                    st.caption("⚠️ 部分成分股資料抓取失敗：" + "；".join(etf_errors[:5]))
                 if not big_changes.empty:
                     st.markdown("**持股增減幅度較大（±5% 以上）的成分股：** " +
                                 "、".join(f"{r['成分股']} {r['持股增減']}" for _, r in big_changes.head(10).iterrows()))
@@ -992,7 +1046,7 @@ try:
         st.subheader(f"🧠 {stock_name} 綜合評估報告")
         st.caption(f"使用 {ai_provider} / {model_choice}。資料涵蓋新聞時事、國際局勢、技術分析、月份效應與估值；同一檔股票每天只自動產生一次，不重複計費。")
 
-        report_key = f"report_v6_{stock_code}_{today:%Y%m%d}_{model_choice}"
+        report_key = f"report_v7_{stock_code}_{today:%Y%m%d}_{model_choice}"
         c_auto, c_regen = st.columns([3, 1])
         auto_report = c_auto.toggle("選到股票時自動產生報告", value=True, key="auto_report")
         regenerate = c_regen.button("🔄 重新產生", use_container_width=True)
@@ -1037,16 +1091,11 @@ try:
     政策 / 關稅 / 地緣政治、籌碼（外資賣超、融資過高）。每點說明可能性（高 / 中 / 低）與觀察指標。
     若認為看空理由比看多理由更有力，要明確說出來）
    ## 🔮 七、未來走勢預估
-   （綜合技術面、基本面、歷史報酬分布、月份效應與國際局勢，用表格列出：
-    期間 | 預估區間（低～高） | 基準預估價 | 方向（偏漲 / 盤整 / 偏跌） | 信心（高 / 中 / 低） | 主要依據
-    期間分成隔天、1 週、1 個月、1 年四列。
-    - 隔天：以「隔天訊號」為主（台積電 ADR、台指期夜盤、美股、法人、融資、夜間新聞），說明各訊號如何影響隔天開盤與收盤
-    - 1 週：以技術面支撐壓力、目前波動度為主
-    - 1 個月：技術面趨勢 + 月份效應 + 新聞與國際局勢
-    - 1 年：以本益比推估合理價（優先用未來一年 EPS，成長股不可只用近四季 EPS）、歷史 1 年報酬分布與產業前景為主
-    「基準情境區間」已把過去的大多頭漲幅換成合理的基準成長（該股歷史與市場 7% 各半），是預估的起點；「若延續過去趨勢」只是對照，不可直接當作預估。
-    不可預設看漲：依據利多與利空的強弱決定方向，技術面轉弱、估值偏高、利空新聞或產業趨勢不利時，應給出「偏跌」並寫出下跌目標價。
-    表格下方逐期說明推論過程，並列出「若跌破 X 則轉弱、若站上 Y 則轉強」的關鍵價位。）
+   （表格：期間 | 方向 | 上漲機率 | 預估價 | ±1σ 區間 | 信心 | 主要依據；期間分成隔天、1 週、1 個月、1 年四列。
+    方向、上漲機率、預估價、區間、信心「必須直接採用」【模型量化判斷】的數值，不得依個人看法修改或推翻；
+    你的任務是用專業語言解釋模型為何得出這個結論（引用計分卡中影響最大的因子與其理論依據），
+    並補充模型未涵蓋的風險。若你認為模型可能有盲點，放在表格下方的「模型限制」段落說明，但不改變結論。
+    表格下方逐期說明，並列出「若跌破 X 則轉弱、若站上 Y 則轉強」的關鍵價位（取自支撐與壓力）。）
 2. 最後輸出「## 🧾 總結」：
    - 先用表格列出「面向 | 評等 | 一句話評語」
    - 用「⚖️ 多空對照」表格並列最重要的 3 個看多理由與 3 個看空理由，說明哪一方目前比較有力
@@ -1122,7 +1171,7 @@ try:
     # ── 未來走勢預估：補上 AI 綜合預估 (取自綜合評估報告第七節) ──
     with tab_forecast:
         st.markdown("---")
-        st.markdown("### 🧠 AI 綜合預估（技術面 + 基本面 + 歷史 + 國際局勢）")
+        st.markdown("### 🧠 AI 解讀（解釋模型結論，不改變方向與機率）")
         report = st.session_state.get(report_key, "")
         start = report.find("## 🔮")
         if start >= 0:
