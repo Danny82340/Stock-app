@@ -529,6 +529,105 @@ def cross_signal(fast, slow):
     return None
 
 
+RISK_LEVELS = [(6, "🔴", "高風險"), (4, "🟠", "警戒"), (2, "🟡", "留意"), (0, "🟢", "低風險")]
+
+
+def assess_risk(d, adj, pe_pct=np.nan, pe_vs_peer=np.nan):
+    """多指標風險評估：乖離以「自身近三年歷史」為基準，不同波動的股票才有可比性"""
+    last = d.iloc[-1]
+    price = float(last['Close'])
+    items = []  # (分數, 類型, 說明)
+
+    # 季線乖離與自身歷史百分位
+    bias = float((price / last['60MA'] - 1) * 100)
+    bias_pct = np.nan
+    if len(adj) > 300:
+        a = adj.iloc[-756:]
+        hist_bias = ((a / a.rolling(60).mean() - 1) * 100).dropna()
+        bias_pct = float((hist_bias < bias).mean() * 100)
+    pct_txt = f"，位於自身近三年 {bias_pct:.0f} 百分位" if not np.isnan(bias_pct) else ""
+    if bias_pct >= 90 or bias > 25:
+        items.append((2, "過熱", f"季線乖離 {bias:+.1f}%{pct_txt}，漲多易拉回"))
+        bias_text = "🔥 高檔過熱！請勿追高"
+    elif bias_pct >= 80 or bias > 15:
+        items.append((1, "過熱", f"季線乖離 {bias:+.1f}%{pct_txt}，位階偏高"))
+        bias_text = "⚠️ 位階偏熱，留意拉回"
+    elif bias_pct <= 10 or bias < -15:
+        items.append((2, "弱勢", f"季線乖離 {bias:+.1f}%{pct_txt}，跌深但趨勢偏弱"))
+        bias_text = "🚨 極端超跌，趨勢偏弱"
+    elif bias_pct <= 20 or bias < -10:
+        items.append((1, "弱勢", f"季線乖離 {bias:+.1f}%{pct_txt}，位階偏低"))
+        bias_text = "⚠️ 位階偏低，觀察止跌"
+    else:
+        bias_text = "➡️ 位階正常"
+    if not np.isnan(bias_pct):
+        bias_text += f"（近三年 {bias_pct:.0f} 百分位）"
+
+    # RSI / KD / MACD
+    rsi, k = float(last['RSI']), float(last['K'])
+    if rsi > 80:
+        items.append((2, "過熱", f"RSI {rsi:.0f} 嚴重超買"))
+    elif rsi > 70:
+        items.append((1, "過熱", f"RSI {rsi:.0f} 超買"))
+    elif rsi < 30:
+        items.append((1, "弱勢", f"RSI {rsi:.0f} 超賣，賣壓沉重"))
+    if cross_signal(d['K'], d['D']) == "death":
+        items.append((2 if k > 80 else 1, "轉弱", f"KD 死亡交叉{'（高檔）' if k > 80 else ''}"))
+    if cross_signal(d['DIF'], d['MACD']) == "death":
+        items.append((1, "轉弱", "MACD 死亡交叉"))
+    if last['DIF'] < 0 and last['MACD'] < 0:
+        items.append((1, "空頭", "MACD 位於零軸下方"))
+
+    # 趨勢：均線
+    ma20 = d['Close'].rolling(20).mean()
+    ma60_slope = float(d['60MA'].iloc[-1] - d['60MA'].iloc[-21]) if len(d) > 80 else 0.0
+    if price < last['60MA'] and ma60_slope < 0:
+        items.append((2, "空頭", "跌破季線且季線下彎"))
+    elif price < last['60MA']:
+        items.append((1, "空頭", "股價在季線之下"))
+    if price < ma20.iloc[-1] < last['60MA']:
+        items.append((1, "空頭", "短中期均線空頭排列"))
+
+    # 自高點回落幅度
+    drawdown = (price / float(d['High'].max()) - 1) * 100
+    if drawdown < -35:
+        items.append((2, "弱勢", f"距一年高點已回落 {drawdown:.0f}%"))
+    elif drawdown < -20:
+        items.append((1, "弱勢", f"距一年高點已回落 {drawdown:.0f}%"))
+
+    # 波動度異常
+    if len(adj) > 300:
+        vol = np.log(adj.iloc[-756:]).diff().rolling(20).std().dropna()
+        if len(vol) > 60 and vol.median() > 0 and vol.iloc[-1] / vol.median() > 1.5:
+            items.append((1, "波動", f"波動度升至平常的 {vol.iloc[-1] / vol.median():.1f} 倍"))
+
+    # 量價
+    vol_ratio = float(last['Volume'] / d['Volume'].iloc[-21:-1].mean()) if d['Volume'].iloc[-21:-1].mean() > 0 else 1.0
+    day_chg = float((price / d['Close'].iloc[-2] - 1) * 100)
+    if vol_ratio > 2 and day_chg < -2:
+        items.append((2, "賣壓", f"爆量下跌（量增 {vol_ratio:.1f} 倍、跌 {day_chg:.1f}%）"))
+    elif vol_ratio > 2 and rsi > 70:
+        items.append((1, "過熱", f"爆量追價（量增 {vol_ratio:.1f} 倍）"))
+
+    # 布林通道
+    if price >= last['BB_UP']:
+        items.append((1, "過熱", "觸及布林上軌"))
+    elif price <= last['BB_LOW']:
+        items.append((1, "弱勢", "跌破布林下軌"))
+
+    # 估值
+    if pe_pct >= 80:
+        items.append((1, "估值", f"本益比位於近一年 {pe_pct:.0f} 百分位"))
+    if pe_vs_peer >= 50:
+        items.append((1, "估值", f"本益比比同類股中位數高 {pe_vs_peer:.0f}%"))
+
+    score = sum(s for s, _, _ in items)
+    emoji, level = next((e, l) for th, e, l in RISK_LEVELS if score >= th)
+    items.sort(key=lambda x: -x[0])
+    return {"score": score, "emoji": emoji, "level": level, "items": items,
+            "bias": bias, "bias_pct": bias_pct, "bias_text": bias_text}
+
+
 def ask_ai(provider, key, model, prompt, max_tokens=1500):
     if provider == "Claude":
         headers = {
@@ -608,14 +707,6 @@ try:
     kd_cross = cross_signal(df['K'], df['D'])
     kd_status = {"golden": "🔥 KD 黃金交叉 (多頭)", "death": "⚠️ KD 死亡交叉 (空頭)"}.get(kd_cross, "➡️ KD 區間震盪")
 
-    # 乖離狀態
-    if bias_60 < -10:
-        bias_text, bias_color = "🚨 極端超跌！砸坑機會", "inverse"
-    elif bias_60 > 15:
-        bias_text, bias_color = "⚠️ 高檔過熱！請勿追高", "off"
-    else:
-        bias_text, bias_color = "➡️ 軌道合理！紀律操作", "normal"
-
     # RSI 狀態
     if current_rsi > 70:
         rsi_text, rsi_color = "⚠️ 超買區 (>70)", "inverse"
@@ -685,6 +776,26 @@ try:
 
     # 未來走勢：歷史報酬分布、技術面支撐壓力、本益比推估合理價
     long_adj = load_long_history(stock_code)
+
+    # 風險評估 (主分析標的含估值面；其他勾選股票只看價量)
+    pe_vs_peer = (current_pe / peer_pe_median - 1) * 100 if not np.isnan(peer_pe_median) and not np.isnan(current_pe) else np.nan
+    risk = assess_risk(df, long_adj, pe_pct, pe_vs_peer)
+    bias_text = risk["bias_text"]
+    bias_color = "inverse" if risk["items"] and any(t in ("過熱", "弱勢") and "乖離" in s for _, t, s in risk["items"]) else "normal"
+    risk_board = []
+    for code in checked_codes:
+        try:
+            r = risk if code == stock_code else assess_risk(add_indicators(get_price_data(code)), load_long_history(code))
+        except Exception:
+            continue
+        risk_board.append({
+            "股票": f"{ALL_STOCKS[code]} ({code})",
+            "燈號": f"{r['emoji']} {r['level']}",
+            "風險分數": r["score"],
+            "季線乖離": f"{r['bias']:+.1f}%" + (f"（{r['bias_pct']:.0f} 百分位）" if not np.isnan(r['bias_pct']) else ""),
+            "主要警訊": "、".join(s for _, _, s in r["items"][:3]) or "無明顯警訊",
+        })
+    risk_board = pd.DataFrame(risk_board).sort_values("風險分數", ascending=False) if risk_board else pd.DataFrame()
     projection = compute_projection(long_adj, current_price) if len(long_adj) > 120 else pd.DataFrame()
     history_years = len(long_adj) / 252
 
@@ -748,6 +859,7 @@ try:
 - 布林通道：下軌 {float(last['BB_LOW']):.2f} / 中軌 {float(last['BB_MID']):.2f} / 上軌 {float(last['BB_UP']):.2f}（{bb_text}）
 - 成交量為近 20 日均量的 {vol_ratio:.2f} 倍
 - 52 週區間 {low_52w:.2f} ~ {high_52w:.2f}，目前位於區間 {pos_52w:.0f}% 位置
+- 風險燈號：{risk['emoji']} {risk['level']}（分數 {risk['score']}），警訊：{"、".join(s for _, _, s in risk['items']) or "無"}
 
 【估值】{"、".join(f"{k} {v}" for k, v in valuation.items()) or "（無資料）"}
 【本益比推估合理價】{"、".join(f"{k}（{pe:.1f} 倍）→ {p:.2f}" for k, (pe, p) in pe_targets.items()) or "（無資料）"}
@@ -836,6 +948,18 @@ try:
             st.metric(label="KD 技術指標狀態", value=f"K:{current_k:.1f} / D:{current_d:.1f}", delta=kd_status, delta_color="normal")
         with col3:
             st.metric(label="60MA 季線乖離預警", value=f"{bias_60:+.2f}%", delta=bias_text, delta_color=bias_color)
+
+        st.subheader(f"🚦 {stock_name} 風險燈號：{risk['emoji']} {risk['level']}（分數 {risk['score']}）")
+        if risk["items"]:
+            for s, t, text in risk["items"]:
+                st.markdown(f"- {'🔴' if s >= 2 else '🟡'} **[{t}]** {text}")
+        else:
+            st.markdown("- 🟢 目前沒有明顯的技術面或估值警訊")
+        st.caption("分數：0-1 🟢 低風險｜2-3 🟡 留意｜4-5 🟠 警戒｜6 以上 🔴 高風險。乖離以該股自身近三年的歷史分布判斷，波動大的股票不會動不動就被判過熱。")
+
+        if len(risk_board) > 1:
+            st.markdown("**📋 所有勾選股票風險總覽**")
+            st.dataframe(risk_board, use_container_width=True, hide_index=True)
 
         st.subheader("💰 估值評估（證交所 / 櫃買中心官方資料）")
         if not own_val:
