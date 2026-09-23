@@ -186,8 +186,9 @@ def load_news(query, limit=8, days=7):
 def load_etf_holdings(code):
     """MoneyDJ ETF 持股明細：成分股、權重、持股增減 (投信每月公布)"""
     try:
-        html = requests.get("https://www.moneydj.com/ETF/X/Basic/Basic0007a.xdjhtm", params={"etfid": code},
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=15).text
+        resp = requests.get("https://www.moneydj.com/ETF/X/Basic/Basic0007a.xdjhtm", params={"etfid": code},
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        html = resp.content.decode("utf-8", errors="replace")  # 網頁沒標明編碼，requests 會誤判成 ISO-8859-1
     except Exception:
         return pd.DataFrame(), ""
     pos = html.find('id="Repeater1"')
@@ -1204,8 +1205,11 @@ def collect_model_inputs(code, name, d, adj, projection, nextday_p, nextday_poin
     extras = load_yahoo_extras(code)
     fwd_eps = extras.get("預估 EPS（分析師共識）")
     fair_pe = float(pe_hist.median()) if pe_hist is not None and len(pe_hist) > 20 else inp["pe"]
-    if fwd_eps and not np.isnan(fair_pe):
-        inp["fair_value"] = fwd_eps * fair_pe
+    if fwd_eps and not np.isnan(fair_pe) and inp["pe"] > 0:
+        # Yahoo 的預估 EPS 常是「下一個會計年度」，可能跨兩年；未來一年成長率設上下限，避免把多年成長一次算進去
+        eps_ttm = price / inp["pe"]
+        inp["eps_growth"] = float(np.clip(fwd_eps / eps_ttm - 1, -0.4, 0.35))
+        inp["fair_value"] = eps_ttm * (1 + inp["eps_growth"]) * fair_pe
         inp["fair_gap"] = (inp["fair_value"] / price - 1) * 100
     # 季節性
     seas = load_seasonality(code)
@@ -1292,7 +1296,8 @@ def build_horizon_scorecards(inp):
     if "fair_gap" in inp:
         g = inp["fair_gap"]
         add("1 年", "fair_value", "合理價缺口", "盈餘折現：預估 EPS × 合理本益比推算合理價，價格終將向價值收斂",
-            f"合理價 {inp['fair_value']:.2f}（{g:+.1f}%）", np.clip(g / 3, -8, 8))
+            f"合理價 {inp['fair_value']:.2f}（{g:+.1f}%；未來一年 EPS 成長 {inp['eps_growth'] * 100:+.0f}%，上限 35%）",
+            np.clip(g / 3, -8, 8))
     if rev and not np.isnan(rev.get("cum_yoy", np.nan)):
         cy = rev["cum_yoy"]
         add("1 年", "growth", "營收成長（今年累計）", "成長因子：營收與獲利成長是長期股價的核心驅動",

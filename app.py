@@ -232,10 +232,10 @@ def confirm_remove(code):
     if code in DEFAULT_STOCKS:
         st.caption("這是預設股票，之後可以在「新增股票」按「還原預設股票」找回。")
     c_yes, c_no = st.columns(2)
-    if c_yes.button("確定移除", type="primary", use_container_width=True):
+    if c_yes.button("確定移除", type="primary", width="stretch"):
         remove_codes([code])
         st.rerun()
-    if c_no.button("取消", use_container_width=True):
+    if c_no.button("取消", width="stretch"):
         st.rerun()
 
 
@@ -277,14 +277,14 @@ for cat, pool in STOCK_POOL.items():
         c_pick, c_del = st.sidebar.columns([6, 1], gap="small", vertical_alignment="center")
         c_pick.button(f"{'✓ ' if picked else ''}{name}（{code.split('.')[0]}）", key=f"pick_{code}",
                       type="primary" if picked else "secondary", on_click=toggle_pick, args=(code,),
-                      use_container_width=True)
-        if c_del.button("−", key=f"del_{code}", help=f"移除 {name}", use_container_width=True):
+                      width="stretch")
+        if c_del.button("−", key=f"del_{code}", help=f"移除 {name}", width="stretch"):
             confirm_remove(code)
 
 checked_codes = [c for c in ALL_STOCKS if st.session_state.get(f"chk_{c}", False)]
 stock_code = None
 if checked_codes:
-    st.sidebar.button(f"取消全部選取（目前 {len(checked_codes)} 檔）", on_click=clear_checks, use_container_width=True)
+    st.sidebar.button(f"取消全部選取（目前 {len(checked_codes)} 檔）", on_click=clear_checks, width="stretch")
     st.sidebar.markdown("---")
     stock_code = st.sidebar.selectbox("🔎 主分析標的", checked_codes, format_func=lambda c: f"{ALL_STOCKS[c]} ({c})")
     stock_name = ALL_STOCKS[stock_code]
@@ -315,9 +315,9 @@ with st.sidebar.expander("➕ 新增股票", expanded=True):
     st.radio("市場", [".TW", ".TWO"], key="add_board", horizontal=True,
              format_func=lambda s: "上市 (.TW)" if s == ".TW" else "上櫃 (.TWO)")
     st.caption("新增後會依證交所 / 櫃買中心的產業別自動歸類（例如聯發科 → 半導體類、ETF → 大盤市值與高股息）。")
-    st.button("加入並選取", type="primary", on_click=add_to_watchlist, use_container_width=True)
+    st.button("加入並選取", type="primary", on_click=add_to_watchlist, width="stretch")
     if WATCH["hidden"]:
-        st.button(f"↩️ 還原被移除的預設股票（{len(WATCH['hidden'])} 檔）", on_click=restore_defaults, use_container_width=True)
+        st.button(f"↩️ 還原被移除的預設股票（{len(WATCH['hidden'])} 檔）", on_click=restore_defaults, width="stretch")
 
 # AI設定區
 st.sidebar.markdown("---")
@@ -711,7 +711,7 @@ try:
                         c["table"].style.apply(lambda r: [f"color: {'#E5484D' if r['加減分'] > 0 else '#30A46C' if r['加減分'] < 0 else MUTED}"
                                                           if col in ('判讀', '加減分') and pd.notna(r['加減分']) else "" for col in r.index], axis=1)
                                         .format({"加減分": lambda v: "—" if pd.isna(v) else f"{v:+.1f}"}),
-                        use_container_width=True, hide_index=True)
+                        width="stretch", hide_index=True)
             st.caption("紅 = 偏多、綠 = 偏空（台股慣例）。隔天與 1 週的因子權重由「📝 每日檢討」依實際命中率自動校準；"
                        "1 個月與 1 年驗證週期長，目前採學術文獻與實務常用的經驗權重。")
 
@@ -728,7 +728,7 @@ try:
 
         if not nextday_table.empty:
             st.markdown("#### 🌙 隔天訊號面板")
-            st.dataframe(nextday_table, use_container_width=True, hide_index=True)
+            st.dataframe(nextday_table, width="stretch", hide_index=True)
         if upcoming:
             st.markdown("#### 📅 未來兩週重要事件")
             for d_, text in upcoming:
@@ -757,7 +757,7 @@ try:
             show["上漲機率 (%)"] = show["上漲機率 (%)"].round(0)
             show["基準年化成長 (%)"] = show["基準年化成長 (%)"].round(1)
             show["過去平均漲幅 (%)"] = show["過去平均漲幅 (%)"].round(1)
-            st.dataframe(show, use_container_width=True, hide_index=True)
+            st.dataframe(show, width="stretch", hide_index=True)
 
             # 扇形圖：近半年走勢 + 未來區間
             hist_px = df['Close'].iloc[-126:]
@@ -774,7 +774,7 @@ try:
                                      fillcolor="rgba(212,175,55,0.35)", line=dict(width=0)))
             fan.add_trace(go.Scatter(x=fx, y=band("中位數"), name="中位數", mode="lines+markers",
                                      line=dict(color=GOLD, width=2, dash="dash")))
-            st.plotly_chart(style_fig(fan, 420), use_container_width=True)
+            st.plotly_chart(style_fig(fan, 420), width="stretch")
 
         sup_col, res_col, pe_col = st.columns(3, gap="small")
         with sup_col:
@@ -836,7 +836,7 @@ try:
             st.dataframe(
                 nextday_table.style.apply(lambda r: [f"color: {'#E5484D' if r['加減分'] > 0 else '#30A46C' if r['加減分'] < 0 else MUTED}"
                                                      if c in ('影響', '加減分') else "" for c in r.index], axis=1),
-                use_container_width=True, hide_index=True)
+                width="stretch", hide_index=True)
             weight_meta = load_model_weights()["meta"]
             st.caption("加減分為對「隔天上漲機率」的影響（百分點，紅 = 偏多、綠 = 偏空，依台股慣例）；加減分 = 原始分數 × 權重。"
                        + (f"權重由每日檢討自動校準（最後更新 {weight_meta.get('updated', '—')}，累積 {weight_meta.get('samples', 0)} 筆驗證）。"
@@ -862,7 +862,7 @@ try:
 
         if len(risk_board) > 1:
             st.markdown("**📋 所有選取股票風險總覽**")
-            st.dataframe(risk_board, use_container_width=True, hide_index=True)
+            st.dataframe(risk_board, width="stretch", hide_index=True)
 
         st.subheader("💰 估值評估（證交所 / 櫃買中心官方資料）")
         if not own_val:
@@ -897,7 +897,7 @@ try:
                     for q, label, color in [(0.25, "25 百分位", "#30A46C"), (0.5, "中位數", MUTED), (0.75, "75 百分位", "#E5484D")]:
                         pe_fig.add_hline(y=float(pe_hist.quantile(q)), line=dict(color=color, dash="dash", width=1),
                                          annotation_text=label, annotation_position="right")
-                    st.plotly_chart(style_fig(pe_fig, 280), use_container_width=True)
+                    st.plotly_chart(style_fig(pe_fig, 280), width="stretch")
             elif stock_code.endswith(".TWO"):
                 st.caption("上櫃股票目前只提供當日本益比，暫無歷史區間。")
 
@@ -923,7 +923,7 @@ try:
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='收盤價', line=dict(color=GOLD, width=2)))
         fig.add_trace(go.Scatter(x=df.index, y=df['60MA'], name='60MA 季線', line=dict(color="#4C8DFF", dash='dash')))
-        st.plotly_chart(style_fig(fig, 420), use_container_width=True)
+        st.plotly_chart(style_fig(fig, 420), width="stretch")
 
         news_col, world_col = st.columns(2, gap="large")
         with news_col:
@@ -946,14 +946,14 @@ try:
                 e3.metric("亮警戒 / 高風險的權重", f"{risky_weight:.1f}%",
                           delta="成分股轉弱" if risky_weight >= 20 else "成分股大致穩定",
                           delta_color="inverse" if risky_weight >= 20 else "off")
-                st.dataframe(etf_top, use_container_width=True, hide_index=True)
+                st.dataframe(etf_top, width="stretch", hide_index=True)
                 if etf_errors:
                     st.caption("⚠️ 部分成分股資料抓取失敗：" + "；".join(etf_errors[:5]))
                 if not big_changes.empty:
                     st.markdown("**持股增減幅度較大（±5% 以上）的成分股：** " +
                                 "、".join(f"{r['成分股']} {r['持股增減']}" for _, r in big_changes.head(10).iterrows()))
                 with st.expander(f"查看全部 {len(etf_holdings)} 檔成分股"):
-                    st.dataframe(etf_holdings, use_container_width=True, hide_index=True)
+                    st.dataframe(etf_holdings, width="stretch", hide_index=True)
             if etf_news:
                 st.markdown("**📰 近 90 天成分股調整新聞**")
                 show_news(etf_news)
@@ -1005,7 +1005,7 @@ try:
 
         style_fig(tech_fig, 900)
         tech_fig.update_layout(showlegend=False)
-        st.plotly_chart(tech_fig, use_container_width=True)
+        st.plotly_chart(tech_fig, width="stretch")
 
     # ── 多股比較 ──
     with tab_compare:
@@ -1037,9 +1037,9 @@ try:
                 })
             if mode.startswith("累積"):
                 cmp_fig.add_hline(y=0, line=dict(color=MUTED, dash="dot", width=1))
-            st.plotly_chart(style_fig(cmp_fig, 460), use_container_width=True)
+            st.plotly_chart(style_fig(cmp_fig, 460), width="stretch")
             if summary:
-                st.dataframe(pd.DataFrame(summary), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(summary), width="stretch", hide_index=True)
 
     # ── AI 綜合評估 (放在最後執行，等待 AI 時不會卡住其他分頁) ──
     with tab_ai:
@@ -1049,7 +1049,7 @@ try:
         report_key = f"report_v7_{stock_code}_{today:%Y%m%d}_{model_choice}"
         c_auto, c_regen = st.columns([3, 1])
         auto_report = c_auto.toggle("選到股票時自動產生報告", value=True, key="auto_report")
-        regenerate = c_regen.button("🔄 重新產生", use_container_width=True)
+        regenerate = c_regen.button("🔄 重新產生", width="stretch")
 
         etf_prompt = ("\n   ## 🧺 ETF 成分股分析\n"
                       "   （這是 ETF，請評估前十大成分股的表現與風險燈號、集中度風險、持股增減與成分股調整新聞，"
@@ -1135,14 +1135,14 @@ try:
             if market_ctx.empty:
                 st.caption("暫時抓不到國際指標。")
             else:
-                st.dataframe(market_ctx, use_container_width=True, hide_index=True)
+                st.dataframe(market_ctx, width="stretch", hide_index=True)
             st.markdown(f"**📅 月份效應（近 10 年）** — 本月 {this_m} 月、下個月 {next_m} 月")
             if seasonality.empty:
                 st.caption("暫時抓不到歷史月資料。")
             else:
                 st.dataframe(
                     seasonality.style.apply(lambda r: ["background-color: rgba(212,175,55,0.25)" if r.name in (this_m, next_m) else "" for _ in r], axis=1),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
             st.markdown("**💰 估值**")
             st.write(valuation or "暫時抓不到估值資料。")
@@ -1227,14 +1227,14 @@ try:
                 hit_fig.add_trace(go.Bar(x=daily.index, y=daily["當日命中率"], name="當日命中率", marker_color="rgba(212,175,55,0.35)"))
                 hit_fig.add_trace(go.Scatter(x=daily.index, y=daily["累積命中率"], name="累積命中率", line=dict(color=GOLD, width=2)))
                 hit_fig.add_hline(y=50, line=dict(color=MUTED, dash="dot", width=1), annotation_text="50%（擲硬幣）")
-                st.plotly_chart(style_fig(hit_fig, 300), use_container_width=True)
+                st.plotly_chart(style_fig(hit_fig, 300), width="stretch")
 
                 if not mine.empty:
                     with st.expander(f"{stock_name} 的歷次預測與結果"):
                         st.dataframe(mine[["base_date", "target_date", "stat_p", "final_p", "ret_1d", "命中"]].rename(columns={
                             "base_date": "依據收盤日", "target_date": "驗證日", "stat_p": "統計機率 (%)",
                             "final_p": "預測上漲機率 (%)", "ret_1d": "實際漲跌 (%)"}).iloc[::-1],
-                            use_container_width=True, hide_index=True)
+                            width="stretch", hide_index=True)
             else:
                 st.caption("預測已開始累積，下一個交易日之後就會有命中率統計。")
 
@@ -1245,7 +1245,7 @@ try:
                     {"因子": FACTOR_LABELS.get(k, k), "命中率（含歷史回填）": f"{s['acc'] * 100:.1f}%" if s.get("acc") is not None else "—",
                      "樣本": s.get("n", 0), "實盤樣本": s.get("live_n", 0), "權重": s.get("weight", 1.0)}
                     for k, s in weight_info["factor_stats"].items()]).sort_values("樣本", ascending=False),
-                    use_container_width=True, hide_index=True)
+                    width="stretch", hide_index=True)
                 st.caption("命中率 50% 的因子權重為 1.0；越準權重越高（最高 2），越不準越接近 0（等於停用）。樣本少時會向 1.0 收斂，避免被少數幾天誤導。")
 
             pick = st.selectbox("📅 檢討報告日期", [p.stem for p in reviews])
