@@ -374,6 +374,45 @@ def load_seasonality(code):
     }, index=g.mean().index)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_long_history(code):
+    """近 10 年日線 (還原除權息)，用於歷史報酬分布"""
+    try:
+        df = _flatten(yf.download(code, period="10y", auto_adjust=False, progress=False))
+        return df["Adj Close"].dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+FORECAST_HORIZONS = {"1 週": 5, "1 個月": 21, "1 年": 252}
+
+
+def compute_projection(adj, price):
+    """用歷史同期間報酬分布 + 目前波動度，估算未來價格區間"""
+    rows = []
+    log_ret = np.log(adj).diff().dropna()
+    sigma_d = float(log_ret.iloc[-60:].std()) if len(log_ret) >= 60 else np.nan
+    for label, h in FORECAST_HORIZONS.items():
+        fwd = (adj.shift(-h) / adj - 1).dropna()
+        if len(fwd) < max(h * 2, 60):
+            continue
+        q = fwd.quantile([0.10, 0.25, 0.50, 0.75, 0.90])
+        sig = sigma_d * np.sqrt(h)
+        rows.append({
+            "期間": label,
+            "悲觀 (10%)": price * (1 + q[0.10]),
+            "保守 (25%)": price * (1 + q[0.25]),
+            "中位數": price * (1 + q[0.50]),
+            "樂觀 (75%)": price * (1 + q[0.75]),
+            "極樂觀 (90%)": price * (1 + q[0.90]),
+            "歷史上漲機率 (%)": float((fwd > 0).mean() * 100),
+            "目前波動 ±1σ": f"{price * np.exp(-sig):.2f} ~ {price * np.exp(sig):.2f}" if not np.isnan(sig) else "—",
+            "樣本數": len(fwd),
+            "_days": h,
+        })
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_official_valuation():
     """證交所 / 櫃買中心官方公布的全市場本益比、殖利率、股價淨值比 (每日更新)"""
@@ -644,6 +683,42 @@ try:
         valuation["備註"] = "近四季虧損，無本益比"
     this_m, next_m = today.month, today.month % 12 + 1
 
+    # 未來走勢：歷史報酬分布、技術面支撐壓力、本益比推估合理價
+    long_adj = load_long_history(stock_code)
+    projection = compute_projection(long_adj, current_price) if len(long_adj) > 120 else pd.DataFrame()
+    history_years = len(long_adj) / 252
+
+    levels = {
+        "20MA": ma20, "60MA": float(last['60MA']),
+        "120MA": float(df['Close'].rolling(120).mean().iloc[-1]),
+        "布林上軌": float(last['BB_UP']), "布林下軌": float(last['BB_LOW']),
+        "20 日高點": float(df['High'].iloc[-20:].max()), "20 日低點": float(df['Low'].iloc[-20:].min()),
+        "60 日高點": float(df['High'].iloc[-60:].max()), "60 日低點": float(df['Low'].iloc[-60:].min()),
+        "52 週高點": high_52w, "52 週低點": low_52w,
+    }
+    levels = {k: v for k, v in levels.items() if not np.isnan(v)}
+    supports = sorted([(v, k) for k, v in levels.items() if v < current_price], reverse=True)[:4]
+    resistances = sorted([(v, k) for k, v in levels.items() if v > current_price])[:4]
+
+    pe_targets = {}
+    if not np.isnan(current_pe):
+        eps_ttm = current_price / current_pe
+        if not np.isnan(pe_pct):
+            for q, label in [(0.25, "歷史本益比 25 百分位"), (0.5, "歷史本益比中位數"), (0.75, "歷史本益比 75 百分位")]:
+                pe_q = float(pe_hist.quantile(q))
+                pe_targets[label] = (pe_q, eps_ttm * pe_q)
+        if not np.isnan(peer_pe_median):
+            pe_targets["同類股本益比中位數"] = (peer_pe_median, eps_ttm * peer_pe_median)
+
+    def projection_text():
+        if projection.empty:
+            return "（歷史資料不足）"
+        return "\n".join(
+            f"- {r['期間']}：10%={r['悲觀 (10%)']:.2f}、25%={r['保守 (25%)']:.2f}、中位數={r['中位數']:.2f}、"
+            f"75%={r['樂觀 (75%)']:.2f}、90%={r['極樂觀 (90%)']:.2f}，歷史上漲機率 {r['歷史上漲機率 (%)']:.0f}%，"
+            f"以近 60 日波動度估算 ±1σ 區間 {r['目前波動 ±1σ']}"
+            for _, r in projection.iterrows())
+
     def show_news(items):
         if not items:
             st.caption("暫時抓不到新聞。")
@@ -675,6 +750,14 @@ try:
 - 52 週區間 {low_52w:.2f} ~ {high_52w:.2f}，目前位於區間 {pos_52w:.0f}% 位置
 
 【估值】{"、".join(f"{k} {v}" for k, v in valuation.items()) or "（無資料）"}
+【本益比推估合理價】{"、".join(f"{k}（{pe:.1f} 倍）→ {p:.2f}" for k, (pe, p) in pe_targets.items()) or "（無資料）"}
+
+【支撐與壓力】
+- 支撐：{"、".join(f"{k} {v:.2f}" for v, k in supports) or "（無）"}
+- 壓力：{"、".join(f"{k} {v:.2f}" for v, k in resistances) or "（創一年新高，無上方壓力）"}
+
+【歷史報酬分布推估的未來價格（近 {history_years:.1f} 年日資料，以目前股價 {current_price:.2f} 為基準）】
+{projection_text()}
 
 【國際與大盤指標】
 {market_ctx.to_string(index=False) if not market_ctx.empty else "（無資料）"}
@@ -689,7 +772,60 @@ try:
 {news_text(world_news)}
 """
 
-    tab_overview, tab_ai, tab_tech, tab_compare = st.tabs(["🏠 總覽", "🧠 AI 綜合評估", "📐 技術分析", "📊 多股比較"])
+    tab_overview, tab_ai, tab_forecast, tab_tech, tab_compare = st.tabs(
+        ["🏠 總覽", "🧠 AI 綜合評估", "🔮 未來走勢預估", "📐 技術分析", "📊 多股比較"])
+
+    # ── 未來走勢預估 (量化部分；AI 預估在最後補上) ──
+    with tab_forecast:
+        st.subheader(f"🔮 {stock_name} 未來 1 週 / 1 個月 / 1 年價格預估")
+        st.caption("以下為統計推估的「可能區間」，不是保證會到的價位，僅供參考。")
+
+        if projection.empty:
+            st.info("歷史資料不足，無法計算統計區間。")
+        else:
+            st.markdown(f"**📊 歷史經驗區間**：統計近 {history_years:.1f} 年，每一天往後持有 1 週、1 個月、1 年的實際漲跌幅，套用到目前股價 {current_price:.2f}。")
+            show = projection.drop(columns=["_days"]).copy()
+            for col in ["悲觀 (10%)", "保守 (25%)", "中位數", "樂觀 (75%)", "極樂觀 (90%)"]:
+                show[col] = show[col].map(lambda p: f"{p:.2f}（{(p / current_price - 1) * 100:+.1f}%）")
+            show["歷史上漲機率 (%)"] = show["歷史上漲機率 (%)"].round(0)
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+            # 扇形圖：近半年走勢 + 未來區間
+            hist_px = df['Close'].iloc[-126:]
+            last_day = hist_px.index[-1]
+            fx = [last_day] + [last_day + pd.tseries.offsets.BDay(d) for d in projection["_days"]]
+            band = lambda col: [current_price] + list(projection[col])
+            fan = go.Figure()
+            fan.add_trace(go.Scatter(x=hist_px.index, y=hist_px, name="收盤價", line=dict(color=TEXT, width=2)))
+            fan.add_trace(go.Scatter(x=fx, y=band("極樂觀 (90%)"), line=dict(width=0), showlegend=False, hoverinfo="skip"))
+            fan.add_trace(go.Scatter(x=fx, y=band("悲觀 (10%)"), name="10%~90% 區間", fill="tonexty",
+                                     fillcolor="rgba(212,175,55,0.15)", line=dict(width=0)))
+            fan.add_trace(go.Scatter(x=fx, y=band("樂觀 (75%)"), line=dict(width=0), showlegend=False, hoverinfo="skip"))
+            fan.add_trace(go.Scatter(x=fx, y=band("保守 (25%)"), name="25%~75% 區間", fill="tonexty",
+                                     fillcolor="rgba(212,175,55,0.35)", line=dict(width=0)))
+            fan.add_trace(go.Scatter(x=fx, y=band("中位數"), name="中位數", mode="lines+markers",
+                                     line=dict(color=GOLD, width=2, dash="dash")))
+            st.plotly_chart(style_fig(fan, 420), use_container_width=True)
+
+        sup_col, res_col, pe_col = st.columns(3, gap="large")
+        with sup_col:
+            st.markdown("**🟢 技術面支撐**")
+            for v, k in supports:
+                st.markdown(f"- {k}：**{v:.2f}**（{(v / current_price - 1) * 100:+.1f}%）")
+        with res_col:
+            st.markdown("**🔴 技術面壓力**")
+            if not resistances:
+                st.markdown("- 已創一年新高，上方無明顯壓力")
+            for v, k in resistances:
+                st.markdown(f"- {k}：**{v:.2f}**（{(v / current_price - 1) * 100:+.1f}%）")
+        with pe_col:
+            st.markdown("**💰 本益比推估合理價**")
+            if not pe_targets:
+                st.markdown("- 無本益比資料（ETF 或虧損），或請先到總覽載入近一年本益比區間")
+            for k, (pe, p) in pe_targets.items():
+                st.markdown(f"- {k} {pe:.1f} 倍 → **{p:.2f}**（{(p / current_price - 1) * 100:+.1f}%）")
+            if pe_targets:
+                st.caption("假設近四季 EPS 不變；實際要看未來獲利成長。")
 
     # ── 總覽 ──
     with tab_overview:
@@ -828,7 +964,7 @@ try:
         st.subheader(f"🧠 {stock_name} 綜合評估報告")
         st.caption(f"使用 {ai_provider} / {model_choice}。資料涵蓋新聞時事、國際局勢、技術分析、月份效應與估值；同一檔股票每天只自動產生一次，不重複計費。")
 
-        report_key = f"report_{stock_code}_{today:%Y%m%d}_{model_choice}"
+        report_key = f"report_v2_{stock_code}_{today:%Y%m%d}_{model_choice}"
         c_auto, c_regen = st.columns([3, 1])
         auto_report = c_auto.toggle("選到股票時自動產生報告", value=True, key="auto_report")
         regenerate = c_regen.button("🔄 重新產生", use_container_width=True)
@@ -848,11 +984,20 @@ try:
    ## 💰 五、估值與位階
    （本益比與同類股中位數比較、近一年本益比百分位、股價淨值比、殖利率、52 週位階；缺資料就說明無法評估，ETF 改評估殖利率與位階）
    ## ⚠️ 六、主要風險
+   ## 🔮 七、未來走勢預估
+   （綜合技術面、基本面、歷史報酬分布、月份效應與國際局勢，用表格列出：
+    期間 | 預估區間（低～高） | 基準預估價 | 方向（偏漲 / 盤整 / 偏跌） | 信心（高 / 中 / 低） | 主要依據
+    期間分成 1 週、1 個月、1 年三列。
+    - 1 週：以技術面支撐壓力、目前波動度為主
+    - 1 個月：技術面趨勢 + 月份效應 + 新聞與國際局勢
+    - 1 年：以本益比推估合理價、歷史 1 年報酬分布與產業前景為主
+    基準預估價原則上落在歷史 25%~75% 區間內；若超出，必須說明理由。表格下方逐期說明推論過程，
+    並列出「若跌破 X 則轉弱、若站上 Y 則轉強」的關鍵價位。）
 2. 最後輸出「## 🧾 總結」：
    - 先用表格列出「面向 | 評等 | 一句話評語」
    - 再給出整體評等（偏多 / 中性 / 偏空）與信心程度（高 / 中 / 低）
-   - 列出短線（1-2 週）與中線（1-3 個月）的觀察重點與關鍵價位
-3. 只能根據提供的資料推論，不要捏造數字或新聞內容；新聞只有標題，判讀時要保守。
+   - 用一句話總結 1 週、1 個月、1 年的基準預估價
+3. 只能根據提供的資料推論，不要捏造數字或新聞內容；新聞只有標題，判讀時要保守。價格預估是機率性的推估，要說明不確定性。
 4. 結尾加一行：「以上為資料彙整與分析，非投資建議，請自行判斷風險。」
 
 即時資料：
@@ -863,14 +1008,14 @@ try:
         elif regenerate or (auto_report and report_key not in st.session_state):
             with st.spinner(f"AI 正在綜合評估 {stock_name}（約 30-60 秒）..."):
                 try:
-                    st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=4000)
+                    st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=6000)
                 except Exception as e:
                     st.error(f"AI 連線失敗，請檢查 API Key 是否正確。錯誤代碼: {str(e)}")
         elif report_key not in st.session_state:
             if st.button("🚀 產生綜合評估報告"):
                 with st.spinner(f"AI 正在綜合評估 {stock_name}（約 30-60 秒）..."):
                     try:
-                        st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=4000)
+                        st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=6000)
                     except Exception as e:
                         st.error(f"AI 連線失敗，請檢查 API Key 是否正確。錯誤代碼: {str(e)}")
 
@@ -915,5 +1060,21 @@ try:
                         st.write(ai_reply)
                     except Exception as e:
                         st.error(f"AI 連線失敗，請檢查 API Key 是否正確。錯誤代碼: {str(e)}")
+
+    # ── 未來走勢預估：補上 AI 綜合預估 (取自綜合評估報告第七節) ──
+    with tab_forecast:
+        st.markdown("---")
+        st.markdown("### 🧠 AI 綜合預估（技術面 + 基本面 + 歷史 + 國際局勢）")
+        report = st.session_state.get(report_key, "")
+        start = report.find("## 🔮")
+        if start >= 0:
+            end = report.find("\n## ", start + 5)
+            with st.container(border=True):
+                st.markdown(report[start:end if end > 0 else None].replace("## 🔮 七、未來走勢預估", "", 1))
+        elif report:
+            st.caption("AI 報告中沒有找到預估段落，請到「🧠 AI 綜合評估」查看完整報告或按「🔄 重新產生」。")
+        else:
+            st.caption("輸入 API Key 後，AI 綜合評估報告會一併產生 1 週 / 1 個月 / 1 年的預估。")
+        st.caption("⚠️ 以上為統計與 AI 推估，股價受突發事件影響很大，實際走勢可能完全不同，請勿作為買賣依據。")
 except Exception as main_e:
     st.error(f"數據載入失敗，可能因 Yahoo 網路阻擋，請重新整理網頁。錯誤原因: {str(main_e)}")
