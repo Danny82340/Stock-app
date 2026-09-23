@@ -85,30 +85,43 @@ STOCK_POOL = {
     "光電與重電綠能": {"1519.TW": "華城", "2409.TW": "友達", "3481.TW": "群創"},
     "大盤市值與高股息": {"0050.TW": "元大台灣50", "0056.TW": "元大高股息", "00878.TW": "國泰永續高股息"}
 }
-CUSTOM_CATEGORY = "⭐ 自選股"
+DEFAULT_CATEGORIES = list(STOCK_POOL)
+NEW_GROUP = "➕ 建立新群組…"
 
-# 產業類別的 icon 與色塊
+# 產業類別的 icon 與色塊 (自訂群組依序套用 GROUP_COLORS)
 CATEGORY_STYLE = {
     "半導體先進封裝": ("🔬", "#4C8DFF"),
     "AI伺服器代工群": ("🖥️", "#9B6BFF"),
     "光電與重電綠能": ("⚡", "#2EC4A6"),
     "大盤市值與高股息": ("🏦", GOLD),
-    CUSTOM_CATEGORY: ("⭐", "#FF8A4C"),
 }
+GROUP_COLORS = ["#FF8A4C", "#E5484D", "#30A46C", "#F5A524", "#00B8D9", "#D6409F", "#8A96AD"]
+
+
+def category_style(cat):
+    if cat in CATEGORY_STYLE:
+        return CATEGORY_STYLE[cat]
+    return "📁", GROUP_COLORS[sum(map(ord, cat)) % len(GROUP_COLORS)]
 
 # 自選股存檔 (重新啟動後仍保留)
 WATCHLIST_FILE = Path(__file__).parent / "watchlist.json"
 
 
 def load_watchlist():
-    """{"custom": {代號: 名稱}, "hidden": [被移除的預設股票代號]}"""
+    """{"custom": {代號: {"name", "group"}}, "hidden": [被移除/移走的預設股票], "groups": [自訂群組]}"""
     try:
         data = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         data = {}
-    if "custom" not in data:  # 舊格式：整個檔案就是自選股
-        data = {"custom": data, "hidden": []}
+    if "custom" not in data:  # 最舊格式：整個檔案就是 {代號: 名稱}
+        data = {"custom": data}
     data.setdefault("hidden", [])
+    data.setdefault("groups", [])
+    for code, info in list(data["custom"].items()):
+        if isinstance(info, str):  # 舊版「⭐ 自選股」→ 移到「我的股票」群組
+            data["custom"][code] = {"name": info, "group": "我的股票"}
+            if "我的股票" not in data["groups"]:
+                data["groups"].append("我的股票")
     return data
 
 
@@ -163,46 +176,92 @@ if "watchlist" not in st.session_state:
 
 WATCH = st.session_state.watchlist
 DEFAULT_STOCKS = {code: name for pool in STOCK_POOL.values() for code, name in pool.items()}
+DEFAULT_CATEGORY_OF = {code: cat for cat, pool in STOCK_POOL.items() for code in pool}
 STOCK_POOL = {cat: {c: n for c, n in pool.items() if c not in WATCH["hidden"]} for cat, pool in STOCK_POOL.items()}
-STOCK_POOL[CUSTOM_CATEGORY] = WATCH["custom"]
+for g in WATCH["groups"]:
+    STOCK_POOL.setdefault(g, {})
+for code, info in WATCH["custom"].items():
+    STOCK_POOL.setdefault(info["group"], {})[code] = info["name"]
 ALL_STOCKS = {code: name for pool in STOCK_POOL.values() for code, name in pool.items()}
 CODE_TO_CATEGORY = {code: cat for cat, pool in STOCK_POOL.items() for code in pool}
 
 
-def _add_code(code, name):
-    if code in WATCH["hidden"]:  # 之前移除的預設股票 → 恢復
-        WATCH["hidden"].remove(code)
-    elif code not in DEFAULT_STOCKS:
-        WATCH["custom"][code] = name
-    st.session_state[f"chk_{code}"] = True
+def _resolve_group(prefix):
+    """讀取「選擇群組 / 建立新群組」的選擇結果"""
+    group = st.session_state.get(f"{prefix}_group", DEFAULT_CATEGORIES[0])
+    if group == NEW_GROUP:
+        group = st.session_state.get(f"{prefix}_new_group", "").strip() or "未命名群組"
+    if group not in DEFAULT_CATEGORIES and group not in WATCH["groups"]:
+        WATCH["groups"].append(group)
+    return group
+
+
+def _place_code(code, name, group):
+    """把股票放進指定群組；預設股票放回原本類別就恢復，放到別的群組則從原類別隱藏"""
+    if code in DEFAULT_STOCKS and DEFAULT_CATEGORY_OF[code] == group:
+        if code in WATCH["hidden"]:
+            WATCH["hidden"].remove(code)
+        WATCH["custom"].pop(code, None)
+        return
+    if code in DEFAULT_STOCKS and code not in WATCH["hidden"]:
+        WATCH["hidden"].append(code)
+    WATCH["custom"][code] = {"name": name, "group": group}
 
 
 def add_to_watchlist():
-    for code in st.session_state.get("add_pick", []):
-        _add_code(code, MARKET[code][0])
+    group = _resolve_group("add")
+    codes = [(c, MARKET[c][0]) for c in st.session_state.get("add_pick", [])]
     manual = st.session_state.get("add_manual", "").strip().upper()
     if manual:
         code = manual if "." in manual else manual + st.session_state.get("add_board", ".TW")
-        _add_code(code, st.session_state.get("add_manual_name", "").strip() or code)
+        codes.append((code, st.session_state.get("add_manual_name", "").strip() or code))
+    for code, name in codes:
+        _place_code(code, name, group)
+        st.session_state[f"chk_{code}"] = True
     save_watchlist(WATCH)
     st.session_state.add_pick = []
     st.session_state.add_manual = ""
     st.session_state.add_manual_name = ""
+    st.session_state.add_new_group = ""
+
+
+def move_selected():
+    group = _resolve_group("move")
+    for code in st.session_state.get("move_pick", []):
+        _place_code(code, ALL_STOCKS[code], group)
+    save_watchlist(WATCH)
+    st.session_state.move_pick = []
+    st.session_state.move_new_group = ""
 
 
 def remove_selected():
     for code in st.session_state.get("remove_pick", []):
-        if code in WATCH["custom"]:
-            WATCH["custom"].pop(code)
-        elif code in DEFAULT_STOCKS and code not in WATCH["hidden"]:
+        WATCH["custom"].pop(code, None)
+        if code in DEFAULT_STOCKS and code not in WATCH["hidden"]:
             WATCH["hidden"].append(code)
         st.session_state.pop(f"chk_{code}", None)
     save_watchlist(WATCH)
     st.session_state.remove_pick = []
 
 
+def delete_group():
+    group = st.session_state.get("delete_group_pick")
+    if not group:
+        return
+    for code in list(STOCK_POOL.get(group, {})):
+        WATCH["custom"].pop(code, None)
+        if code in DEFAULT_STOCKS and code not in WATCH["hidden"]:
+            WATCH["hidden"].append(code)
+        st.session_state.pop(f"chk_{code}", None)
+    if group in WATCH["groups"]:
+        WATCH["groups"].remove(group)
+    save_watchlist(WATCH)
+
+
 def restore_defaults():
     WATCH["hidden"] = []
+    for code in DEFAULT_STOCKS:
+        WATCH["custom"].pop(code, None)
     save_watchlist(WATCH)
 
 
@@ -238,6 +297,10 @@ with st.sidebar.expander("➕ 新增 / ➖ 移除股票", expanded=True):
     st.text_input("股票名稱 (選填)", key="add_manual_name", placeholder="例如：聯發科")
     st.radio("市場", [".TW", ".TWO"], key="add_board", horizontal=True,
              format_func=lambda s: "上市 (.TW)" if s == ".TW" else "上櫃 (.TWO)")
+    group_options = list(STOCK_POOL) + [NEW_GROUP]
+    st.selectbox("📁 加入到哪個群組", group_options, key="add_group")
+    if st.session_state.get("add_group") == NEW_GROUP:
+        st.text_input("新群組名稱", key="add_new_group", placeholder="例如：我的存股、機器人概念")
     st.button("加入並勾選", on_click=add_to_watchlist, use_container_width=True)
 
     st.markdown("---")
@@ -246,17 +309,34 @@ with st.sidebar.expander("➕ 新增 / ➖ 移除股票", expanded=True):
                    format_func=lambda c: f"{ALL_STOCKS[c]} ({c})", key="remove_pick")
     st.button("移除選取的股票", on_click=remove_selected, use_container_width=True)
     if WATCH["hidden"]:
-        st.button(f"↩️ 還原被移除的預設股票（{len(WATCH['hidden'])} 檔）", on_click=restore_defaults, use_container_width=True)
+        st.button(f"↩️ 還原預設股票到原本類別（{len(WATCH['hidden'])} 檔）", on_click=restore_defaults, use_container_width=True)
+
+with st.sidebar.expander("📁 群組管理（移動股票 / 刪除群組）"):
+    st.markdown("**🔀 把股票移到其他群組**")
+    st.multiselect("選擇股票 (可多選)", options=list(ALL_STOCKS),
+                   format_func=lambda c: f"{ALL_STOCKS[c]} ({c}) · {CODE_TO_CATEGORY[c]}", key="move_pick")
+    st.selectbox("移到群組", group_options, key="move_group")
+    if st.session_state.get("move_group") == NEW_GROUP:
+        st.text_input("新群組名稱", key="move_new_group", placeholder="例如：我的存股")
+    st.button("移動", on_click=move_selected, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("**🗑️ 刪除群組**")
+    st.selectbox("選擇群組", [g for g, pool in STOCK_POOL.items() if pool or g in WATCH["groups"]], key="delete_group_pick")
+    st.caption("群組內的股票會一併移除；預設類別可用「還原預設股票」找回。")
+    st.button("刪除這個群組", on_click=delete_group, use_container_width=True)
 
 # 各類別勾選清單
 for cat, pool in STOCK_POOL.items():
-    if not pool:
+    if not pool and cat not in WATCH["groups"]:
         continue
-    icon, color = CATEGORY_STYLE[cat]
+    icon, color = category_style(cat)
     n_checked = sum(st.session_state.get(f"chk_{c}", False) for c in pool)
     title = cat if cat.startswith(icon) else f"{icon} {cat}"
     count = f'<span class="cat-count">已勾選 {n_checked}</span>' if n_checked else ""
     st.sidebar.html(f'<div class="cat-header" style="border-left-color:{color};">{title}{count}</div>')
+    if not pool:
+        st.sidebar.caption("（空群組，可在上方新增股票或移入股票）")
     for code, name in pool.items():
         st.sidebar.checkbox(f"{name} ({code})", key=f"chk_{code}")
 
@@ -268,7 +348,7 @@ if checked_codes:
     stock_code = st.sidebar.selectbox("🔎 主分析標的", checked_codes, format_func=lambda c: f"{ALL_STOCKS[c]} ({c})")
     stock_name = ALL_STOCKS[stock_code]
     category = CODE_TO_CATEGORY[stock_code]
-    cat_icon, cat_color = CATEGORY_STYLE[category]
+    cat_icon, cat_color = category_style(category)
     st.sidebar.html(f"""<div class="sector-badge">
     <div class="swatch" style="background:{cat_color};"></div>
     <div class="icon">{cat_icon}</div>
@@ -815,6 +895,8 @@ try:
     # 主動搜尋利空與產業展望，避免只看到正面消息
     bad_news = load_news(f"{stock_name} (利空 OR 下修 OR 衰退 OR 虧損 OR 砍單 OR 調降 OR 賣超 OR 裁員 OR 競爭 OR 訴訟 OR 跌停)", days=30)
     outlook_news = load_news(f"{stock_name} (展望 OR 前景 OR 法說 OR 產業趨勢 OR 營收)", days=30)
+    # 成長題材：訂單能見度、AI / 機器人等長期趨勢、地緣政治與供應鏈
+    theme_news = load_news(f"{stock_name} (訂單 OR 產能 OR 擴產 OR 資本支出 OR AI OR 機器人 OR 地緣政治 OR 供應鏈)", days=30)
     market_ctx = load_market_context()
     seasonality = load_seasonality(stock_code)
     today = datetime.now(TAIPEI)
@@ -825,7 +907,7 @@ try:
     current_pe = own_val.get("本益比", np.nan)
     peer_pes = [official_vals.get(c, {}).get("本益比", np.nan) for c in STOCK_POOL.get(category, {}) if c != stock_code]
     peer_pes = [p for p in peer_pes if not np.isnan(p)]
-    peer_pe_median = float(np.median(peer_pes)) if category != CUSTOM_CATEGORY and len(peer_pes) >= 2 else np.nan
+    peer_pe_median = float(np.median(peer_pes)) if len(peer_pes) >= 2 else np.nan
 
     pe_hist = pd.Series(dtype=float)
     pe_hist_key = f"pe_hist_{stock_code}"
@@ -1005,6 +1087,9 @@ try:
 【近 30 天產業展望 / 法說 / 營收新聞標題】
 {news_text(outlook_news)}
 
+【近 30 天成長題材新聞標題（訂單、產能、AI、機器人、地緣政治、供應鏈）】
+{news_text(theme_news)}
+
 【個股近 7 天新聞標題】
 {news_text(stock_news)}
 
@@ -1177,6 +1262,9 @@ try:
             st.subheader("🔭 產業展望 / 法說 / 營收")
             show_news(outlook_news)
 
+        st.subheader("🚀 近 30 天成長題材新聞（訂單、產能、AI、機器人、地緣政治）")
+        show_news(theme_news)
+
     # ── 技術分析 ──
     with tab_tech:
         c1, c2, c3 = st.columns(3, gap="large")
@@ -1253,7 +1341,7 @@ try:
         st.subheader(f"🧠 {stock_name} 綜合評估報告")
         st.caption(f"使用 {ai_provider} / {model_choice}。資料涵蓋新聞時事、國際局勢、技術分析、月份效應與估值；同一檔股票每天只自動產生一次，不重複計費。")
 
-        report_key = f"report_v3_{stock_code}_{today:%Y%m%d}_{model_choice}"
+        report_key = f"report_v4_{stock_code}_{today:%Y%m%d}_{model_choice}"
         c_auto, c_regen = st.columns([3, 1])
         auto_report = c_auto.toggle("選到股票時自動產生報告", value=True, key="auto_report")
         regenerate = c_regen.button("🔄 重新產生", use_container_width=True)
@@ -1278,6 +1366,20 @@ try:
    ## 💰 五、估值與位階
    （本益比與同類股中位數比較、近一年本益比百分位、股價淨值比、殖利率、52 週位階；缺資料就說明無法評估，ETF 改評估殖利率與位階）
    ## ⚠️ 六、主要風險
+   ## 🐂 多方觀點：為何看好？
+   （扮演看多的分析師，具體說明「為什麼市場看好這檔股票」，至少 3 點，逐點從以下角度檢視（不適用的略過）：
+    - 業績與訂單能見度：訂單是否已排到未來 1-2 年、產能是否滿載、營收與毛利趨勢、法說會指引
+    - 產業需求：例如 AI 晶片、高效能運算、伺服器、電力設備等需求是否持續成長
+    - 技術領先與護城河：製程 / 技術 / 市占的領先程度，對手追趕難度
+    - 地緣政治與戰爭：是「風險」還是「受惠」要說清楚（例如供應鏈重組、國防需求、各國補貼設廠，或反過來的戰爭斷鏈風險）
+    每點標註時間軸（短期 / 中期 / 長期）、可能性（高 / 中 / 低）與要追蹤的觀察指標（例如月營收、法說指引、資本支出））
+   ## 🚀 長期產業趨勢（3-10 年）
+   （評估這檔股票在長期大趨勢中的位置：
+    - AI 持續進步 → AI 代理、人形機器人、自動駕駛、智慧工廠大量落地，是否形成如「工業革命」般的新時代
+    - 在這條產業鏈中，這家公司扮演什麼角色（例如晶片製造、零組件、組裝、電力、材料），受惠程度（高 / 中 / 低）與原因
+    - 這些趨勢大約何時開始反映在營收上、可能帶來多大的成長空間（用情境描述，不要捏造具體數字）
+    - 同時點出這個長期題材「可能不如預期」的情況（技術瓶頸、需求泡沫、被替代）
+    標註：此節可運用一般產業知識，但要註明「產業背景知識，非即時資料」）
    ## 🐻 空方觀點與長期隱憂
    （扮演看空的分析師，至少列出 3 點「這檔股票可能會跌、甚至長期沒落」的理由，涵蓋：
     產業趨勢是否轉弱或被新技術取代、競爭對手與削價、客戶集中與砍單、獲利與毛利下滑、估值過高、
@@ -1295,9 +1397,12 @@ try:
     表格下方逐期說明推論過程，並列出「若跌破 X 則轉弱、若站上 Y 則轉強」的關鍵價位。）
 2. 最後輸出「## 🧾 總結」：
    - 先用表格列出「面向 | 評等 | 一句話評語」
+   - 用「⚖️ 多空對照」表格並列最重要的 3 個看多理由與 3 個看空理由，說明哪一方目前比較有力
    - 再給出整體評等（偏多 / 中性 / 偏空）與信心程度（高 / 中 / 低）
    - 用一句話總結 1 週、1 個月、1 年的基準預估價
-3. 只能根據提供的資料推論，不要捏造數字或新聞內容；新聞只有標題，判讀時要保守。價格預估是機率性的推估，要說明不確定性。
+3. 即時數字（股價、指標、估值、新聞）只能根據提供的資料，不要捏造數字或新聞內容；新聞只有標題，判讀時要保守。
+   產業背景、商業模式、長期趨勢可以運用一般知識，但要標註為背景知識，不可編造具體的訂單金額、營收數字或未公開消息。
+   價格預估是機率性的推估，要說明不確定性。
    保持多空中立：過去 10 年台股處於大多頭，歷史數據天生偏多，評估時要主動修正這個偏誤，不要因為「過去一直漲」就推論未來會漲。
 4. 結尾加一行：「以上為資料彙整與分析，非投資建議，請自行判斷風險。」
 
@@ -1309,14 +1414,14 @@ try:
         elif regenerate or (auto_report and report_key not in st.session_state):
             with st.spinner(f"AI 正在綜合評估 {stock_name}（約 30-60 秒）..."):
                 try:
-                    st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=6000)
+                    st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=8000)
                 except Exception as e:
                     st.error(f"AI 連線失敗，請檢查 API Key 是否正確。錯誤代碼: {str(e)}")
         elif report_key not in st.session_state:
             if st.button("🚀 產生綜合評估報告"):
                 with st.spinner(f"AI 正在綜合評估 {stock_name}（約 30-60 秒）..."):
                     try:
-                        st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=6000)
+                        st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=8000)
                     except Exception as e:
                         st.error(f"AI 連線失敗，請檢查 API Key 是否正確。錯誤代碼: {str(e)}")
 
@@ -1376,6 +1481,16 @@ try:
             st.caption("AI 報告中沒有找到預估段落，請到「🧠 AI 綜合評估」查看完整報告或按「🔄 重新產生」。")
         else:
             st.caption("輸入 API Key 後，AI 綜合評估報告會一併產生 1 週 / 1 個月 / 1 年的預估。")
+
+        # 預估背後的理由：看多 / 長期趨勢 / 看空
+        for marker, title in [("## 🐂", "🐂 為何看好？"), ("## 🚀", "🚀 長期產業趨勢（3-10 年）"), ("## 🐻", "🐻 空方觀點與長期隱憂")]:
+            s = report.find(marker)
+            if s < 0:
+                continue
+            e = report.find("\n## ", s + 5)
+            section = report[s:e if e > 0 else None]
+            with st.expander(title, expanded=True):
+                st.markdown(section.split("\n", 1)[1] if "\n" in section else section)
         st.caption("⚠️ 以上為統計與 AI 推估，股價受突發事件影響很大，實際走勢可能完全不同，請勿作為買賣依據。")
 except Exception as main_e:
     st.error(f"數據載入失敗，可能因 Yahoo 網路阻擋，請重新整理網頁。錯誤原因: {str(main_e)}")
