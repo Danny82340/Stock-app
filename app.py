@@ -8,8 +8,13 @@ from bs4 import BeautifulSoup
 import requests
 import json
 import re
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+TAIPEI = ZoneInfo("Asia/Taipei")
 
 # 頁面基本設定
 st.set_page_config(page_title="台股 AI 戰情室", layout="wide")
@@ -269,6 +274,117 @@ def get_price_data(code):
     return df.sort_index()
 
 
+def _flatten(df):
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_news(query, limit=8):
+    """Google 新聞 RSS：近 7 天新聞標題 (免 API Key)"""
+    try:
+        resp = requests.get(
+            "https://news.google.com/rss/search",
+            params={"q": f"{query} when:7d", "hl": "zh-TW", "gl": "TW", "ceid": "TW:zh-Hant"},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=15,
+        )
+        root = ET.fromstring(resp.content)
+    except Exception:
+        return []
+    news = []
+    for item in root.iter("item"):
+        title = item.findtext("title", "").strip()
+        source = item.findtext("source", "").strip()
+        if source and title.endswith(f" - {source}"):
+            title = title[: -len(source) - 3]
+        try:
+            published = parsedate_to_datetime(item.findtext("pubDate", "")).astimezone(TAIPEI).strftime("%m/%d %H:%M")
+        except Exception:
+            published = ""
+        news.append({"title": title, "source": source, "date": published, "link": item.findtext("link", "")})
+        if len(news) >= limit:
+            break
+    return news
+
+
+MARKET_INDICES = {
+    "^TWII": "台股加權指數",
+    "^SOX": "費城半導體指數",
+    "^IXIC": "那斯達克指數",
+    "^GSPC": "S&P 500",
+    "^VIX": "VIX 恐慌指數",
+    "^TNX": "美 10 年債殖利率",
+    "TWD=X": "美元兌台幣",
+}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_market_context():
+    """國際與大盤指標近期表現"""
+    try:
+        raw = yf.download(list(MARKET_INDICES), period="3mo", auto_adjust=False, progress=False)
+        closes = raw["Close"]
+    except Exception:
+        return pd.DataFrame()
+    rows = []
+    for sym, name in MARKET_INDICES.items():
+        if sym not in closes.columns:
+            continue
+        s = closes[sym].dropna()
+        if len(s) < 22:
+            continue
+        pct = lambda n: (s.iloc[-1] / s.iloc[-1 - n] - 1) * 100
+        rows.append({"指標": name, "最新": round(float(s.iloc[-1]), 2), "日漲跌 (%)": round(float(pct(1)), 2),
+                     "近一週 (%)": round(float(pct(5)), 2), "近一月 (%)": round(float(pct(21)), 2)})
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_seasonality(code):
+    """近 10 年各月份的平均報酬與上漲機率 (還原除權息)"""
+    try:
+        df = _flatten(yf.download(code, period="10y", interval="1mo", auto_adjust=False, progress=False))
+        px = df["Adj Close"].dropna()
+    except Exception:
+        return pd.DataFrame()
+    ret = px.pct_change().dropna() * 100
+    this_month = pd.Timestamp(datetime.now(TAIPEI).date()).replace(day=1)
+    ret = ret[ret.index < this_month]  # 排除尚未走完的當月
+    if ret.empty:
+        return pd.DataFrame()
+    g = ret.groupby(ret.index.month)
+    return pd.DataFrame({
+        "月份": [f"{m} 月" for m in g.mean().index],
+        "平均報酬 (%)": g.mean().round(2).values,
+        "中位數 (%)": g.median().round(2).values,
+        "上漲機率 (%)": (g.apply(lambda x: (x > 0).mean()) * 100).round(0).values,
+        "樣本年數": g.count().values,
+    }, index=g.mean().index)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_valuation(code):
+    """估值資料 (Yahoo 有時抓不到，抓不到就略過)"""
+    try:
+        info = yf.Ticker(code).info
+    except Exception:
+        return {}
+    fields = {"trailingPE": "本益比", "priceToBook": "股價淨值比", "trailingAnnualDividendYield": "近一年殖利率 (%)",
+              "marketCap": "市值 (億元)", "beta": "Beta"}
+    result = {}
+    for key, label in fields.items():
+        value = info.get(key)
+        if not isinstance(value, (int, float)):
+            continue
+        if key == "marketCap":
+            value = value / 1e8
+        elif key == "trailingAnnualDividendYield":  # Yahoo 回傳小數，例如 0.045
+            value = value * 100
+        result[label] = round(float(value), 2)
+    return result
+
+
 def add_indicators(df):
     df = df.copy()
     close = df['Close']
@@ -321,7 +437,7 @@ def cross_signal(fast, slow):
     return None
 
 
-def ask_ai(provider, key, model, prompt):
+def ask_ai(provider, key, model, prompt, max_tokens=1500):
     if provider == "Claude":
         headers = {
             "x-api-key": key,
@@ -330,7 +446,7 @@ def ask_ai(provider, key, model, prompt):
         }
         payload = {
             "model": model,
-            "max_tokens": 1500,
+            "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
         url = "https://api.anthropic.com/v1/messages"
@@ -346,7 +462,7 @@ def ask_ai(provider, key, model, prompt):
         }
         url = "https://api.openai.com/v1/chat/completions"
 
-    response = requests.post(url, headers=headers, json=payload, timeout=90)
+    response = requests.post(url, headers=headers, json=payload, timeout=180)
     res_json = response.json()
     if response.status_code != 200:
         err = res_json.get("error", {})
@@ -435,7 +551,68 @@ try:
     else:
         bb_text = "➡️ 通道內運行"
 
-    tab_overview, tab_tech, tab_compare, tab_ai = st.tabs(["🏠 總覽", "📐 技術分析", "📊 多股比較", "🤖 AI 解盤"])
+    # 量能與位階
+    ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
+    vol_ratio = float(last['Volume'] / df['Volume'].iloc[-21:-1].mean()) if 'Volume' in df.columns else np.nan
+    high_52w, low_52w = float(df['High'].max()), float(df['Low'].min())
+    pos_52w = (current_price - low_52w) / (high_52w - low_52w) * 100 if high_52w > low_52w else np.nan
+    ret_1m = float((df['Close'].iloc[-1] / df['Close'].iloc[-22] - 1) * 100) if len(df) > 22 else np.nan
+
+    # 綜合評估用的外部資料 (皆有快取，只針對主分析標的抓取)
+    stock_news = load_news(f"{stock_name} {stock_code.split('.')[0]}")
+    world_news = load_news("美股 OR 聯準會 OR 關稅 OR 地緣政治 OR 費半 OR 台股大盤", limit=10)
+    market_ctx = load_market_context()
+    seasonality = load_seasonality(stock_code)
+    valuation = load_valuation(stock_code)
+    today = datetime.now(TAIPEI)
+    this_m, next_m = today.month, today.month % 12 + 1
+
+    def show_news(items):
+        if not items:
+            st.caption("暫時抓不到新聞。")
+        for n in items:
+            title = n['title'].replace("[", "［").replace("]", "］")
+            st.markdown(f"- [{title}]({n['link']})  \n  <small style='color:{MUTED}'>{n['source']} · {n['date']}</small>",
+                        unsafe_allow_html=True)
+
+    def news_text(items):
+        return "\n".join(f"- ({n['date']}) {n['title']}（{n['source']}）" for n in items) or "（無資料）"
+
+    def season_text():
+        if seasonality.empty:
+            return "（無資料）"
+        lines = [f"- {r['月份']}：平均 {r['平均報酬 (%)']:+.2f}%，中位數 {r['中位數 (%)']:+.2f}%，上漲機率 {r['上漲機率 (%)']:.0f}%（{r['樣本年數']} 年）"
+                 for _, r in seasonality.iterrows()]
+        return "\n".join(lines)
+
+    data_snapshot = f"""【標的】{stock_name}（{stock_code}），產業分類：{category}，資料時間：{today:%Y-%m-%d %H:%M}（台北）
+
+【價格與技術面】
+- 收盤價 {current_price:.2f}，日漲跌 {price_change:+.2f}（{price_pct:+.2f}%），近一月漲跌 {ret_1m:+.2f}%
+- 20MA {ma20:.2f}，60MA {float(last['60MA']):.2f}，季線乖離 {bias_60:+.2f}%（{bias_text}）
+- KD：K {current_k:.1f} / D {current_d:.1f}（{kd_status}）
+- RSI(14)：{current_rsi:.1f}（{rsi_text}）
+- MACD：DIF {current_dif:.2f} / 訊號線 {current_macd:.2f} / OSC {float(last['OSC']):.2f}（{macd_text}）
+- 布林通道：下軌 {float(last['BB_LOW']):.2f} / 中軌 {float(last['BB_MID']):.2f} / 上軌 {float(last['BB_UP']):.2f}（{bb_text}）
+- 成交量為近 20 日均量的 {vol_ratio:.2f} 倍
+- 52 週區間 {low_52w:.2f} ~ {high_52w:.2f}，目前位於區間 {pos_52w:.0f}% 位置
+
+【估值】{"、".join(f"{k} {v}" for k, v in valuation.items()) or "（無資料）"}
+
+【國際與大盤指標】
+{market_ctx.to_string(index=False) if not market_ctx.empty else "（無資料）"}
+
+【月份效應（近 10 年，還原除權息月報酬）】本月為 {this_m} 月，下個月為 {next_m} 月
+{season_text()}
+
+【個股近 7 天新聞標題】
+{news_text(stock_news)}
+
+【國際財經近 7 天新聞標題】
+{news_text(world_news)}
+"""
+
+    tab_overview, tab_ai, tab_tech, tab_compare = st.tabs(["🏠 總覽", "🧠 AI 綜合評估", "📐 技術分析", "📊 多股比較"])
 
     # ── 總覽 ──
     with tab_overview:
@@ -453,12 +630,13 @@ try:
         fig.add_trace(go.Scatter(x=df.index, y=df['60MA'], name='60MA 季線', line=dict(color="#4C8DFF", dash='dash')))
         st.plotly_chart(style_fig(fig, 420), use_container_width=True)
 
-        st.subheader("📰 24H 聯動即時財經新聞")
-        st.caption("自動即時追蹤宏觀事件與個股利空消息")
-        # 簡易財經新聞模擬
-        st.write(f"• [市場頭條] 外資鎖定台股{category}主流，精準調控{stock_name}多頭部位位階。")
-        st.write("• [地緣政治] 美股費半指數高檔劇烈洗盤，引發外資期現貨籌碼短線多空權衡。")
-        st.write("• [全球總經] Fed 最新利率會議風向影響全球資金外溢效應，台股高過熱區防洗盤。")
+        news_col, world_col = st.columns(2, gap="large")
+        with news_col:
+            st.subheader(f"📰 {stock_name} 近 7 天新聞")
+            show_news(stock_news)
+        with world_col:
+            st.subheader("🌏 國際財經新聞")
+            show_news(world_news[:8])
 
     # ── 技術分析 ──
     with tab_tech:
@@ -531,30 +709,95 @@ try:
             if summary:
                 st.dataframe(pd.DataFrame(summary), use_container_width=True, hide_index=True)
 
-    # ── AI 解盤 ──
+    # ── AI 綜合評估 (放在最後執行，等待 AI 時不會卡住其他分頁) ──
     with tab_ai:
-        st.subheader("🤖 AI 智能解盤窗口")
-        st.info(f"目前使用 **{ai_provider} / {model_choice}**。AI 會自動讀取該股的「最新股價、KD、RSI、MACD、布林通道、季線乖離率」，幫您精準分析。")
+        st.subheader(f"🧠 {stock_name} 綜合評估報告")
+        st.caption(f"使用 {ai_provider} / {model_choice}。資料涵蓋新聞時事、國際局勢、技術分析、月份效應與估值；同一檔股票每天只自動產生一次，不重複計費。")
 
-        user_input = st.text_area("✍️ 貼上您看到的最新法說會、新聞或您的成本帳面問題：", height=140, placeholder="例如：這檔股票外資最近狂賣，我成本套在套牢高點，現在黃金交叉該加碼嗎？")
+        report_key = f"report_{stock_code}_{today:%Y%m%d}_{model_choice}"
+        c_auto, c_regen = st.columns([3, 1])
+        auto_report = c_auto.toggle("選到股票時自動產生報告", value=True, key="auto_report")
+        regenerate = c_regen.button("🔄 重新產生", use_container_width=True)
 
-        if st.button("🚀 送出 AI 綜合分析"):
+        report_prompt = f"""你是資深台股研究員，請根據下方「即時資料」為 {stock_name}（{stock_code}）撰寫一份專業的綜合評估報告。
+
+撰寫規則：
+1. 使用繁體中文與 Markdown，依序輸出以下章節，每個章節用條列逐項寫出評語，並在章節最後標註「**評等：偏多 / 中性 / 偏空**」三選一：
+   ## 📰 一、新聞時事
+   （挑出與該股相關的重要新聞逐條點評利多或利空，無關的新聞略過）
+   ## 🌏 二、國際局勢
+   （美股、費半、利率、匯率、VIX、地緣政治與關稅等對該股的影響）
+   ## 📐 三、技術分析
+   （趨勢與均線、KD、RSI、MACD、布林通道、量能、乖離，並指出支撐與壓力價位）
+   ## 📅 四、月份效應
+   （本月與下個月的歷史表現與可能的季節性原因，例如除權息、財報、法說會、作帳行情）
+   ## 💰 五、估值與位階
+   （本益比、殖利率、52 週位階等；缺資料就說明無法評估）
+   ## ⚠️ 六、主要風險
+2. 最後輸出「## 🧾 總結」：
+   - 先用表格列出「面向 | 評等 | 一句話評語」
+   - 再給出整體評等（偏多 / 中性 / 偏空）與信心程度（高 / 中 / 低）
+   - 列出短線（1-2 週）與中線（1-3 個月）的觀察重點與關鍵價位
+3. 只能根據提供的資料推論，不要捏造數字或新聞內容；新聞只有標題，判讀時要保守。
+4. 結尾加一行：「以上為資料彙整與分析，非投資建議，請自行判斷風險。」
+
+即時資料：
+{data_snapshot}"""
+
+        if not api_key:
+            st.warning(f"請先在左側欄輸入 {ai_provider} API Key，選到股票時就會自動產生綜合評估報告。")
+        elif regenerate or (auto_report and report_key not in st.session_state):
+            with st.spinner(f"AI 正在綜合評估 {stock_name}（約 30-60 秒）..."):
+                try:
+                    st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=4000)
+                except Exception as e:
+                    st.error(f"AI 連線失敗，請檢查 API Key 是否正確。錯誤代碼: {str(e)}")
+        elif report_key not in st.session_state:
+            if st.button("🚀 產生綜合評估報告"):
+                with st.spinner(f"AI 正在綜合評估 {stock_name}（約 30-60 秒）..."):
+                    try:
+                        st.session_state[report_key] = ask_ai(ai_provider, api_key, model_choice, report_prompt, max_tokens=4000)
+                    except Exception as e:
+                        st.error(f"AI 連線失敗，請檢查 API Key 是否正確。錯誤代碼: {str(e)}")
+
+        if report_key in st.session_state:
+            with st.container(border=True):
+                st.markdown(st.session_state[report_key])
+
+        with st.expander("📦 本次評估使用的資料"):
+            st.markdown("**🌏 國際與大盤指標**")
+            if market_ctx.empty:
+                st.caption("暫時抓不到國際指標。")
+            else:
+                st.dataframe(market_ctx, use_container_width=True, hide_index=True)
+            st.markdown(f"**📅 月份效應（近 10 年）** — 本月 {this_m} 月、下個月 {next_m} 月")
+            if seasonality.empty:
+                st.caption("暫時抓不到歷史月資料。")
+            else:
+                st.dataframe(
+                    seasonality.style.apply(lambda r: ["background-color: rgba(212,175,55,0.25)" if r.name in (this_m, next_m) else "" for _ in r], axis=1),
+                    use_container_width=True, hide_index=True,
+                )
+            st.markdown("**💰 估值**")
+            st.write(valuation or "暫時抓不到估值資料。")
+
+        st.markdown("---")
+        st.subheader("💬 追問 AI")
+        user_input = st.text_area("✍️ 貼上您看到的最新法說會、新聞或您的成本帳面問題：", height=120, placeholder="例如：這檔股票外資最近狂賣，我成本套在套牢高點，現在黃金交叉該加碼嗎？")
+
+        if st.button("🚀 送出提問"):
             if not api_key:
                 st.warning(f"請先在左側欄輸入您的 {ai_provider} API Key 才能開通大腦功能。")
             else:
                 with st.spinner("AI 正在調閱大盤籌碼與位階數據..."):
                     try:
                         prompt_context = (
-                            f"你是精通台股的財經專家。當前股票：{stock_name}（{stock_code}），股價：{current_price:.2f}，"
-                            f"K值：{current_k:.1f}，D值：{current_d:.1f}（{kd_status}），"
-                            f"RSI(14)：{current_rsi:.1f}（{rsi_text}），"
-                            f"MACD DIF：{current_dif:.2f}，訊號線：{current_macd:.2f}（{macd_text}），"
-                            f"布林通道：下軌 {last['BB_LOW']:.2f} / 中軌 {last['BB_MID']:.2f} / 上軌 {last['BB_UP']:.2f}（{bb_text}），"
-                            f"季線乖離率：{bias_60:.2f}%。用戶提問與新聞背景：{user_input}。"
-                            f"請根據這些即時數據，給予最客觀的操作與預測建議。"
+                            f"你是精通台股的財經專家。以下是 {stock_name} 的即時資料：\n{data_snapshot}\n"
+                            + (f"先前的綜合評估報告：\n{st.session_state[report_key]}\n" if report_key in st.session_state else "")
+                            + f"用戶提問：{user_input}\n請根據這些資料，用繁體中文給予客觀的分析與建議，並提醒風險。"
                         )
                         ai_reply = ask_ai(ai_provider, api_key, model_choice, prompt_context)
-                        st.markdown("### 💡 AI 專家決策建議：")
+                        st.markdown("### 💡 AI 回覆：")
                         st.write(ai_reply)
                     except Exception as e:
                         st.error(f"AI 連線失敗，請檢查 API Key 是否正確。錯誤代碼: {str(e)}")
