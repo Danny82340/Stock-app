@@ -154,8 +154,8 @@ def clear_checks():
 
 # AI 供應商與模型
 AI_PROVIDERS = {
-    "OpenAI": ["gpt-4o-mini", "gpt-4o"],
     "Claude": ["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"],
+    "OpenAI": ["gpt-4o-mini", "gpt-4o"],
 }
 
 # 側邊欄控制
