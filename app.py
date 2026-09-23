@@ -54,8 +54,24 @@ st.html(f"""<style>
     }}
     .stTabs [aria-selected="true"] {{ color: {GOLD} !important; border-bottom: 2px solid {GOLD} !important; }}
 
-    .stButton > button {{ background: {GOLD}; color: {NAVY}; border: none; font-weight: 600; }}
-    .stButton > button:hover {{ background: {GOLD_SOFT}; color: {NAVY}; }}
+    /* 按鈕：primary = 金底 (已選取)，secondary = 深藍底 (未選取) */
+    .stButton > button[kind="primary"], button[data-testid="stBaseButton-primary"] {{
+        background: {GOLD}; color: {NAVY}; border: 1px solid {GOLD}; font-weight: 700;
+    }}
+    .stButton > button[kind="primary"]:hover, button[data-testid="stBaseButton-primary"]:hover {{
+        background: {GOLD_SOFT}; color: {NAVY}; border-color: {GOLD_SOFT};
+    }}
+    .stButton > button[kind="secondary"], button[data-testid="stBaseButton-secondary"] {{
+        background: {NAVY}; color: {TEXT}; border: 1px solid rgba(212,175,55,0.30);
+    }}
+    .stButton > button[kind="secondary"]:hover, button[data-testid="stBaseButton-secondary"]:hover {{
+        border-color: {GOLD}; color: {GOLD};
+    }}
+
+    /* 側邊欄股票按鈕：文字靠左；「−」移除鈕 hover 變紅 */
+    [class*="st-key-pick_"] button {{ justify-content: flex-start; text-align: left; padding-left: 12px; }}
+    [class*="st-key-del_"] button {{ padding: 0; min-height: 38px; font-size: 1.2rem; font-weight: 700; }}
+    [class*="st-key-del_"] button:hover {{ background: #E5484D !important; color: white !important; border-color: #E5484D !important; }}
 
     /* 側邊欄產業大分類標題 */
     .cat-header {{
@@ -234,14 +250,30 @@ def move_selected():
     st.session_state.move_new_group = ""
 
 
-def remove_selected():
-    for code in st.session_state.get("remove_pick", []):
+def remove_codes(codes):
+    for code in codes:
         WATCH["custom"].pop(code, None)
         if code in DEFAULT_STOCKS and code not in WATCH["hidden"]:
             WATCH["hidden"].append(code)
         st.session_state.pop(f"chk_{code}", None)
     save_watchlist(WATCH)
-    st.session_state.remove_pick = []
+
+
+@st.dialog("確認移除股票")
+def confirm_remove(code):
+    st.markdown(f"確定要從「**{CODE_TO_CATEGORY[code]}**」移除 **{ALL_STOCKS[code]}（{code}）** 嗎？")
+    if code in DEFAULT_STOCKS:
+        st.caption("這是預設股票，之後可以在「群組管理」按「還原預設股票」找回。")
+    c_yes, c_no = st.columns(2)
+    if c_yes.button("確定移除", type="primary", use_container_width=True):
+        remove_codes([code])
+        st.rerun()
+    if c_no.button("取消", use_container_width=True):
+        st.rerun()
+
+
+def toggle_pick(code):
+    st.session_state[f"chk_{code}"] = not st.session_state.get(f"chk_{code}", False)
 
 
 def delete_group():
@@ -278,12 +310,48 @@ AI_PROVIDERS = {
 
 # 側邊欄控制
 st.sidebar.header("🎯 標的選擇系統")
-st.sidebar.caption("勾選的股票才會抓資料與分析；未勾選的只是備用清單，不占資源。")
+st.sidebar.caption("點一下股票即可選取（金色底 = 已選取），選取的股票才會抓資料與分析；按右邊「−」可移除。")
 
-# 新增股票
+# 各類別股票清單：點股票切換選取，右邊「−」移除 (會先跳出確認視窗)
+for cat, pool in STOCK_POOL.items():
+    if not pool and cat not in WATCH["groups"]:
+        continue
+    icon, color = category_style(cat)
+    n_checked = sum(st.session_state.get(f"chk_{c}", False) for c in pool)
+    title = cat if cat.startswith(icon) else f"{icon} {cat}"
+    count = f'<span class="cat-count">已選 {n_checked}</span>' if n_checked else ""
+    st.sidebar.html(f'<div class="cat-header" style="border-left-color:{color};">{title}{count}</div>')
+    if not pool:
+        st.sidebar.caption("（空群組，可在下方新增股票或移入股票）")
+    for code, name in pool.items():
+        picked = st.session_state.get(f"chk_{code}", False)
+        c_pick, c_del = st.sidebar.columns([6, 1], gap="small", vertical_alignment="center")
+        c_pick.button(f"{'✓ ' if picked else ''}{name}（{code.split('.')[0]}）", key=f"pick_{code}",
+                      type="primary" if picked else "secondary", on_click=toggle_pick, args=(code,),
+                      use_container_width=True)
+        if c_del.button("−", key=f"del_{code}", help=f"移除 {name}", use_container_width=True):
+            confirm_remove(code)
+
+checked_codes = [c for c in ALL_STOCKS if st.session_state.get(f"chk_{c}", False)]
+stock_code = None
+if checked_codes:
+    st.sidebar.button(f"取消全部選取（目前 {len(checked_codes)} 檔）", on_click=clear_checks, use_container_width=True)
+    st.sidebar.markdown("---")
+    stock_code = st.sidebar.selectbox("🔎 主分析標的", checked_codes, format_func=lambda c: f"{ALL_STOCKS[c]} ({c})")
+    stock_name = ALL_STOCKS[stock_code]
+    category = CODE_TO_CATEGORY[stock_code]
+    cat_icon, cat_color = category_style(category)
+    st.sidebar.html(f"""<div class="sector-badge">
+    <div class="swatch" style="background:{cat_color};"></div>
+    <div class="icon">{cat_icon}</div>
+    <div><div class="name">{stock_name} <span class="sub">{stock_code}</span></div>
+    <div class="sub" style="color:{cat_color};">{category}</div></div>
+</div>""")
+
+# 新增股票 (放在股票清單下方)
+st.sidebar.markdown("---")
 MARKET = load_market_list()
-with st.sidebar.expander("➕ 新增 / ➖ 移除股票", expanded=True):
-    st.markdown("**➕ 新增股票**")
+with st.sidebar.expander("➕ 新增股票", expanded=True):
     if MARKET:
         st.multiselect(
             "搜尋全市場 (輸入代號或名稱)",
@@ -301,17 +369,12 @@ with st.sidebar.expander("➕ 新增 / ➖ 移除股票", expanded=True):
     st.selectbox("📁 加入到哪個群組", group_options, key="add_group")
     if st.session_state.get("add_group") == NEW_GROUP:
         st.text_input("新群組名稱", key="add_new_group", placeholder="例如：我的存股、機器人概念")
-    st.button("加入並勾選", on_click=add_to_watchlist, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("**➖ 移除股票**")
-    st.multiselect("選擇要移除的股票 (可多選)", options=list(ALL_STOCKS),
-                   format_func=lambda c: f"{ALL_STOCKS[c]} ({c})", key="remove_pick")
-    st.button("移除選取的股票", on_click=remove_selected, use_container_width=True)
-    if WATCH["hidden"]:
-        st.button(f"↩️ 還原預設股票到原本類別（{len(WATCH['hidden'])} 檔）", on_click=restore_defaults, use_container_width=True)
+    st.button("加入並選取", type="primary", on_click=add_to_watchlist, use_container_width=True)
 
 with st.sidebar.expander("📁 群組管理（移動股票 / 刪除群組）"):
+    if WATCH["hidden"]:
+        st.button(f"↩️ 還原預設股票到原本類別（{len(WATCH['hidden'])} 檔）", on_click=restore_defaults, use_container_width=True)
+        st.markdown("---")
     st.markdown("**🔀 把股票移到其他群組**")
     st.multiselect("選擇股票 (可多選)", options=list(ALL_STOCKS),
                    format_func=lambda c: f"{ALL_STOCKS[c]} ({c}) · {CODE_TO_CATEGORY[c]}", key="move_pick")
@@ -325,36 +388,6 @@ with st.sidebar.expander("📁 群組管理（移動股票 / 刪除群組）"):
     st.selectbox("選擇群組", [g for g, pool in STOCK_POOL.items() if pool or g in WATCH["groups"]], key="delete_group_pick")
     st.caption("群組內的股票會一併移除；預設類別可用「還原預設股票」找回。")
     st.button("刪除這個群組", on_click=delete_group, use_container_width=True)
-
-# 各類別勾選清單
-for cat, pool in STOCK_POOL.items():
-    if not pool and cat not in WATCH["groups"]:
-        continue
-    icon, color = category_style(cat)
-    n_checked = sum(st.session_state.get(f"chk_{c}", False) for c in pool)
-    title = cat if cat.startswith(icon) else f"{icon} {cat}"
-    count = f'<span class="cat-count">已勾選 {n_checked}</span>' if n_checked else ""
-    st.sidebar.html(f'<div class="cat-header" style="border-left-color:{color};">{title}{count}</div>')
-    if not pool:
-        st.sidebar.caption("（空群組，可在上方新增股票或移入股票）")
-    for code, name in pool.items():
-        st.sidebar.checkbox(f"{name} ({code})", key=f"chk_{code}")
-
-checked_codes = [c for c in ALL_STOCKS if st.session_state.get(f"chk_{c}", False)]
-stock_code = None
-if checked_codes:
-    st.sidebar.button("取消全部勾選", on_click=clear_checks, use_container_width=True)
-    st.sidebar.markdown("---")
-    stock_code = st.sidebar.selectbox("🔎 主分析標的", checked_codes, format_func=lambda c: f"{ALL_STOCKS[c]} ({c})")
-    stock_name = ALL_STOCKS[stock_code]
-    category = CODE_TO_CATEGORY[stock_code]
-    cat_icon, cat_color = category_style(category)
-    st.sidebar.html(f"""<div class="sector-badge">
-    <div class="swatch" style="background:{cat_color};"></div>
-    <div class="icon">{cat_icon}</div>
-    <div><div class="name">{stock_name} <span class="sub">{stock_code}</span></div>
-    <div class="sub" style="color:{cat_color};">{category}</div></div>
-</div>""")
 
 # AI設定區
 st.sidebar.markdown("---")
@@ -828,10 +861,10 @@ def style_fig(fig, height):
     return fig
 
 
-# 待機模式：沒有勾選任何股票就不抓資料
+# 待機模式：沒有選取任何股票就不抓資料
 if not checked_codes:
-    st.info("💤 目前為待機模式：請在左側勾選想分析的股票（勾選 2 檔以上可使用多股比較）。")
-    st.caption(f"備用清單共 {len(ALL_STOCKS)} 檔，未勾選的股票不會下載資料。")
+    st.info("💤 目前為待機模式：請在左側點選想分析的股票（選取 2 檔以上可使用多股比較）。")
+    st.caption(f"備用清單共 {len(ALL_STOCKS)} 檔，未選取的股票不會下載資料。")
     st.stop()
 
 try:
@@ -974,7 +1007,7 @@ try:
         )
     etf_news = load_news(f"{stock_name} 成分股 (調整 OR 納入 OR 剔除 OR 換股)", limit=6, days=90) if is_etf else []
 
-    # 風險評估 (主分析標的含估值面；其他勾選股票只看價量)
+    # 風險評估 (主分析標的含估值面；其他選取股票只看價量)
     pe_vs_peer = (current_pe / peer_pe_median - 1) * 100 if not np.isnan(peer_pe_median) and not np.isnan(current_pe) else np.nan
     risk = assess_risk(df, long_adj, pe_pct, pe_vs_peer)
     bias_text = risk["bias_text"]
@@ -1176,7 +1209,7 @@ try:
         st.caption("分數：0-1 🟢 低風險｜2-3 🟡 留意｜4-5 🟠 警戒｜6 以上 🔴 高風險。乖離以該股自身近三年的歷史分布判斷，波動大的股票不會動不動就被判過熱。")
 
         if len(risk_board) > 1:
-            st.markdown("**📋 所有勾選股票風險總覽**")
+            st.markdown("**📋 所有選取股票風險總覽**")
             st.dataframe(risk_board, use_container_width=True, hide_index=True)
 
         st.subheader("💰 估值評估（證交所 / 櫃買中心官方資料）")
@@ -1305,7 +1338,7 @@ try:
     # ── 多股比較 ──
     with tab_compare:
         if len(checked_codes) < 2:
-            st.info("請在左側勾選 2 檔以上的股票，即可疊圖比較走勢。")
+            st.info("請在左側點選 2 檔以上的股票，即可疊圖比較走勢。")
         else:
             mode = st.radio("比較方式", ["累積報酬率 (%)", "股價 (元)"], horizontal=True)
             palette = [GOLD, "#4C8DFF", "#2EC4A6", "#9B6BFF", "#FF8A4C", "#E5484D", "#30A46C", "#8A96AD"]
