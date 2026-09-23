@@ -60,7 +60,7 @@ for _name in ["load_official_quotes", "load_industry_map", "load_company_names",
               "load_taifex_night", "load_taifex_foreign_oi", "load_t86", "load_tpex_insti", "load_margin",
               "load_long_history", "load_monthly_revenue", "load_profitability", "load_holders", "load_sbl",
               "load_put_call", "load_dividend_calendar", "load_us_earnings", "load_macro", "load_etf_holdings",
-              "load_seasonality", "load_official_valuation", "load_yahoo_extras"]:
+              "load_seasonality", "load_official_valuation", "load_yahoo_extras", "load_max_history"]:
     setattr(M, _name, functools.lru_cache(maxsize=None)(getattr(M, _name)))
 
 
@@ -474,6 +474,16 @@ def main():
         print(f"快照失敗：{e}")
 
     report = build_review(today, preds, weights, today_preds)
+    try:  # 行情轉變偵測：追蹤清單的連動性 / 波動度突然升高
+        regime = M.regime_status(M.load_batch_history(tuple(stocks), period="2y"))
+    except Exception:
+        regime = None
+    if regime:
+        section = ["## 0. 行情轉變偵測", "",
+                   f"近 20 日選股平均相關 {regime['corr_now']:.2f}（平常 {regime['corr_median']:.2f}）、"
+                   f"年化波動 {regime['vol_now']:.0f}%（平常 {regime['vol_median']:.0f}%）、平均漲跌 {regime['ret_20d']:+.1f}%", ""]
+        section += [f"- 🚨 {a}" for a in regime["alerts"]] or ["- 🟢 未偵測到行情轉變訊號"]
+        report = report.replace("## 1. 最近一次預測驗證", "\n".join(section) + "\n\n## 1. 最近一次預測驗證", 1)
     ai_text = ai_review(report)
     if ai_text:
         report = report.replace("## 6. 今日預測", ai_text.strip() + "\n\n## 6. 今日預測")

@@ -233,6 +233,66 @@ def load_batch_history(codes, period="6mo"):
     return result
 
 
+# ─────────────── 題材集中度、歷史修正壓力測試、行情轉變偵測 ───────────────
+STRESS_EVENTS = [  # 近 10 年台股幾次明顯修正 (區間內自高點的最大跌幅)
+    ("2018 貿易戰", "2018-09-28", "2018-12-31"),
+    ("2020 疫情崩跌", "2020-01-20", "2020-03-31"),
+    ("2022 升息修正", "2022-01-03", "2022-10-31"),
+    ("2024 AI 急殺", "2024-07-10", "2024-08-09"),
+]
+
+
+def stress_test(series):
+    """每檔在歷次修正期間的最大跌幅 (%)；上市前的事件為 NaN"""
+    rows = {}
+    for code, s in series.items():
+        rows[code] = {}
+        for name, start, end in STRESS_EVENTS:
+            w = s[(s.index >= start) & (s.index <= end)]
+            rows[code][name] = float((w / w.cummax() - 1).min() * 100) if len(w) > 5 and s.index[0] <= pd.Timestamp(start) else np.nan
+    return pd.DataFrame(rows).T
+
+
+def concentration(series, codes_industry):
+    """選股清單的題材集中度：AI / 半導體 / 電子占比、平均兩兩相關係數、與台積電的相關"""
+    rets = pd.DataFrame({c: s.pct_change() for c, s in series.items()}).iloc[-250:]
+    corr = rets.corr()
+    n = len(corr)
+    avg_corr = float((corr.values.sum() - n) / (n * n - n)) if n > 1 else np.nan
+    tech = sum(1 for c, ind in codes_industry.items() if ind in SEMI_TECH_INDUSTRIES or c in TSMC_HEAVY_ETFS)
+    return {"n": len(codes_industry), "tech_share": tech / max(len(codes_industry), 1), "avg_corr": avg_corr,
+            "corr_tsmc": float(corr["2330.TW"].drop("2330.TW").mean()) if "2330.TW" in corr else np.nan}
+
+
+def regime_status(series, window=20):
+    """行情轉變偵測：選股彼此的連動性或波動度突然升高 (常出現在題材轉弱、恐慌下跌時)"""
+    rets = pd.DataFrame({c: s.pct_change() for c, s in series.items()}).iloc[-300:].dropna(how="all")
+    if rets.shape[1] < 3 or len(rets) < 120:
+        return None
+    corr_series, vol_series = [], []
+    for i in range(window, len(rets) + 1):
+        w = rets.iloc[i - window:i].dropna(axis=1, thresh=window - 2)
+        if w.shape[1] < 3:
+            continue
+        c = w.corr().values
+        k = len(c)
+        corr_series.append((c.sum() - k) / (k * k - k))
+        vol_series.append(float(w.std().mean() * np.sqrt(252) * 100))
+    corr_series, vol_series = pd.Series(corr_series), pd.Series(vol_series)
+    status = {"corr_now": float(corr_series.iloc[-1]), "corr_median": float(corr_series.iloc[:-1].median()),
+              "vol_now": float(vol_series.iloc[-1]), "vol_median": float(vol_series.iloc[:-1].median()),
+              "ret_20d": float(((1 + rets.iloc[-window:].fillna(0)).prod() - 1).mean() * 100)}
+    alerts = []
+    if status["corr_now"] > status["corr_median"] + 0.15:
+        alerts.append(f"選股連動性升高：近 {window} 日平均相關 {status['corr_now']:.2f}（平常 {status['corr_median']:.2f}），走勢越來越同步")
+    if status["vol_now"] > status["vol_median"] * 1.5:
+        alerts.append(f"波動度升高：近 {window} 日年化波動 {status['vol_now']:.0f}%（平常 {status['vol_median']:.0f}%）")
+    if alerts and status["ret_20d"] < -5:
+        alerts.append(f"同時近 {window} 日平均下跌 {status['ret_20d']:.1f}%，符合題材轉弱 / 恐慌性修正的特徵")
+    status["alerts"] = alerts
+    return status
+
+
 def _flatten(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -475,6 +535,44 @@ def load_seasonality(code):
         "上漲機率 (%)": (g.apply(lambda x: (x > 0).mean()) * 100).round(0).values,
         "樣本年數": g.count().values,
     }, index=g.mean().index)
+
+
+def load_max_history(code):
+    """全部歷史 (Yahoo 最早可到 1997 年前後)，用於「完整多空週期」的上漲比例"""
+    try:
+        df = _flatten(yf.download(code, period="max", auto_adjust=False, progress=False))
+        s = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+        return s.dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+FULL_CYCLE_YEARS = 15  # 至少要涵蓋這麼多年 (含 2008 金融海嘯等空頭)，不足的用加權指數補
+
+
+def full_cycle_base_rates(code):
+    """完整週期歷史上漲比例 (持有 N 天後上漲的比例)：個股歷史不滿 15 年時，依不足的年數混入台股加權指數的完整歷史。
+    回傳 (完整週期比例, 近 3 年比例, 資料起始年)"""
+    stock, market = load_max_history(code), load_max_history("^TWII")
+
+    def up_ratio(s, n):
+        f = (s.shift(-n) / s - 1).dropna()
+        return float((f > 0).mean()) if len(f) > 50 else None
+
+    years = len(stock) / 252
+    full, recent = {}, {}
+    for h, n in {"隔天": 1, "1 週": 5, "1 個月": 21, "1 年": 252}.items():
+        r_s, r_m = up_ratio(stock, n), up_ratio(market, n)
+        if r_s is None:
+            full[h] = r_m
+        elif r_m is not None and years < FULL_CYCLE_YEARS:
+            w = years / FULL_CYCLE_YEARS
+            full[h] = w * r_s + (1 - w) * r_m
+        else:
+            full[h] = r_s
+        recent[h] = up_ratio(stock.iloc[-(756 + n):], n)
+    start = int(market.index[0].year) if years < FULL_CYCLE_YEARS and len(market) else (int(stock.index[0].year) if len(stock) else None)
+    return full, recent, start
 
 
 def load_long_history(code):
@@ -1284,9 +1382,9 @@ def collect_model_inputs(code, name, d, adj, projection, nextday_p, nextday_poin
            "is_etf": stock_no.startswith("00")}
     inp["sigma_1d"] = float(np.log(adj).diff().iloc[-60:].std()) if len(adj) > 60 else 0.02
     inp["stat"] = {r["期間"]: float(r["上漲機率 (%)"]) for _, r in projection.iterrows()} if not projection.empty else {}
-    # 該股歷史上漲比例 (持有 N 天後上漲的比例)：模型沒有預測力的期間用這個當估計
-    inp["base_rates"] = {h: float(((adj.shift(-n) / adj - 1).dropna() > 0).mean())
-                         for h, n in HORIZON_DAYS.items() if len(adj) > n + 250}
+    # 模型沒有預測力的期間 (1 個月 / 1 年) 改用「完整多空週期」的歷史上漲比例；
+    # 只用近 10 年會被 2016 年後的多頭 (尤其 AI 熱潮) 拉高，過度樂觀
+    inp["base_rates"], inp["base_rates_recent"], inp["base_start"] = full_cycle_base_rates(code)
     # 技術面
     ma20 = float(d["Close"].rolling(20).mean().iloc[-1])
     ma120 = float(d["Close"].rolling(120).mean().iloc[-1]) if len(d) >= 120 else np.nan
@@ -1501,8 +1599,9 @@ def build_horizon_scorecards(inp):
         if hm["mode"] == "base_rate":
             br = inp.get("base_rates", {}).get(h)
             inp["stat"][h] = br * 100 if br is not None else inp["stat"].get(h, 50.0)
-            base_label[h] = (f"歷史上漲比例（此期間經 20 年回測沒有任何顯著因子，模型無預測力；"
-                             f"驗證期永遠猜漲 {hm['test_always_up'] * 100:.1f}%）")
+            recent = inp.get("base_rates_recent", {}).get(h)
+            base_label[h] = (f"完整週期歷史上漲比例（{inp.get('base_start') or '—'} 年起，含金融海嘯等多空循環；此期間經 20 年回測沒有顯著因子）"
+                             + (f"。近 3 年 AI 多頭期間為 {recent * 100:.0f}%，偏樂觀僅供對照" if recent is not None else ""))
             continue
         coef = hm["coef"]
         terms = {}

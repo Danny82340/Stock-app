@@ -165,7 +165,7 @@ M._loaded_mtime = _model_mtime
 
 # 替資料函式加上快取 (必須在 from stock_model import * 之前，才會拿到快取版本)
 _CACHE_TTL = {
-    "load_official_quotes": 600, "load_batch_history": 300, "load_industry_map": 86400, "load_company_names": 86400, "load_news": 1800, "load_etf_holdings": 86400,
+    "load_official_quotes": 600, "load_batch_history": 300, "load_max_history": 86400, "load_industry_map": 86400, "load_company_names": 86400, "load_news": 1800, "load_etf_holdings": 86400,
     "load_us_overnight": 900, "load_taifex_night": 900, "load_taifex_foreign_oi": 3600, "load_t86": 86400,
     "load_tpex_insti": 3600, "load_margin": 3600, "load_market_context": 1800, "load_seasonality": 86400,
     "load_long_history": 86400, "load_official_valuation": 3600, "load_yahoo_extras": 86400,
@@ -382,6 +382,38 @@ def latest_model_calls():
     return {r["code"]: (r["final_p"], r.get("week_p", np.nan)) for _, r in p.iterrows()}
 
 
+def render_risk_section(hist, table):
+    """題材集中度、行情轉變警示、歷史修正壓力測試"""
+    series = {c: hist[c] for c in table["code"] if c in hist}
+    regime = regime_status(series)
+    if regime and regime["alerts"]:
+        st.error("🚨 **行情轉變警示**\n\n" + "\n".join(f"- {a}" for a in regime["alerts"]))
+
+    st.subheader("🧭 題材集中度與修正壓力測試")
+    conc = concentration(series, {c: industry_of(c) for c in series})
+    k1, k2, k3, k4 = st.columns(4, gap="small")
+    k1.metric("AI / 半導體 / 電子占比", f"{conc['tech_share'] * 100:.0f}%", delta=f"{conc['n']} 檔中", delta_color="off")
+    k2.metric("選股平均連動（相關係數）", f"{conc['avg_corr']:.2f}",
+              delta="高度同步，分散效果有限" if conc["avg_corr"] >= 0.4 else "分散程度尚可",
+              delta_color="inverse" if conc["avg_corr"] >= 0.4 else "off")
+    k3.metric("與台積電的平均連動", f"{conc['corr_tsmc']:.2f}" if not np.isnan(conc["corr_tsmc"]) else "—")
+    if regime:
+        k4.metric("近 20 日連動 / 波動", f"{regime['corr_now']:.2f} / {regime['vol_now']:.0f}%",
+                  delta=f"平常 {regime['corr_median']:.2f} / {regime['vol_median']:.0f}%", delta_color="off")
+
+    stress = stress_test(series)
+    if not stress.empty:
+        stress.index = [ALL_STOCKS[c] for c in stress.index]
+        avg = stress.mean()
+        stress.loc["📊 清單平均"] = avg
+        color = lambda v: f"color: {'#30A46C' if v < -20 else MUTED}" if pd.notna(v) else ""
+        st.markdown("**📉 如果重演過去的修正：每檔在各次修正期間的最大跌幅**")
+        st.dataframe(stress.style.map(color).format("{:.1f}%", na_rep="上市前"), width="stretch")
+        worst = avg.idxmin()
+        st.caption(f"清單平均在「{worst}」期間最大跌了 {avg.min():.1f}%。題材集中時，一旦修正往往一起下跌；"
+                   "這是歷史數據的壓力測試，不代表未來會重演，也不是投資建議。")
+
+
 def render_buy_ranking(table, calls):
     """今日買進參考排名：依每日檢討最新預測排序，並附 20 年回測的歷史勝率 (區分跳空與實際可交易)"""
     st.subheader("🏆 今日買進參考排名（數據分析）")
@@ -487,6 +519,7 @@ def render_home():
     m3.metric("今日最強", best["股票"], delta=f"{best['當日 %']:+.2f}%")
     m4.metric("今日最弱", worst["股票"], delta=f"{worst['當日 %']:+.2f}%")
 
+    render_risk_section(hist, table)
     render_buy_ranking(table, calls)
 
     period = st.radio("📊 漲跌排行期間", ["當日 %", "當月 %", "3 個月 %", "半年 %", "1 年 %", "5 年 %"],
