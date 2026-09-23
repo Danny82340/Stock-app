@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from datetime import datetime, timedelta
+from statistics import NormalDist
 from zoneinfo import ZoneInfo
 
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -438,10 +439,11 @@ def load_news(query, limit=8, days=7):
         if source and title.endswith(f" - {source}"):
             title = title[: -len(source) - 3]
         try:
-            published = parsedate_to_datetime(item.findtext("pubDate", "")).astimezone(TAIPEI).strftime("%m/%d %H:%M")
+            pub_dt = parsedate_to_datetime(item.findtext("pubDate", "")).astimezone(TAIPEI)
+            published, ts = pub_dt.strftime("%m/%d %H:%M"), pub_dt.isoformat()
         except Exception:
-            published = ""
-        news.append({"title": title, "source": source, "date": published, "link": item.findtext("link", "")})
+            published, ts = "", ""
+        news.append({"title": title, "source": source, "date": published, "ts": ts, "link": item.findtext("link", "")})
         if len(news) >= limit:
             break
     return news
@@ -472,6 +474,141 @@ def load_etf_holdings(code):
     if not holdings.empty:
         holdings = holdings.sort_values("權重 (%)", ascending=False).reset_index(drop=True)
     return holdings, (dates[-1] if dates else "")
+
+
+# ─────────────── 隔天訊號用的資料 ───────────────
+US_OVERNIGHT = {"TSM": "台積電 ADR", "^SOX": "費城半導體", "^IXIC": "那斯達克", "^GSPC": "S&P 500", "NVDA": "輝達",
+                "^VIX": "VIX 恐慌指數"}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_us_overnight():
+    """美股最近一個交易日的漲跌 (台股收盤後才開盤，是隔天台股的重要參考)"""
+    try:
+        raw = yf.download(list(US_OVERNIGHT) + ["TWD=X"], period="10d", auto_adjust=False, progress=False)["Close"]
+    except Exception:
+        return {}
+    result = {}
+    for sym in list(US_OVERNIGHT) + ["TWD=X"]:
+        if sym not in raw.columns:
+            continue
+        s = raw[sym].dropna()
+        if len(s) >= 2:
+            result[sym] = {"date": s.index[-1].date(), "close": float(s.iloc[-1]),
+                           "chg": float((s.iloc[-1] / s.iloc[-2] - 1) * 100)}
+    return result
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_taifex_night():
+    """期交所台指期 (TX) 近月：日盤結算價與夜盤最新價"""
+    try:
+        rows = requests.get("https://openapi.taifex.com.tw/v1/DailyMarketReportFut", timeout=20).json()
+    except Exception:
+        return {}
+    tx = [r for r in rows if r.get("Contract") == "TX" and len(str(r.get("ContractMonth(Week)", "")).strip()) == 6]
+    if not tx:
+        return {}
+    near = min(r["ContractMonth(Week)"] for r in tx)
+    day = next((r for r in tx if r["ContractMonth(Week)"] == near and r.get("TradingSession") == "一般"), None)
+    night = next((r for r in tx if r["ContractMonth(Week)"] == near and r.get("TradingSession") == "盤後"), None)
+    if not day or not night:
+        return {}
+    base = _to_float(day.get("SettlementPrice"))
+    if np.isnan(base):
+        base = _to_float(day.get("Last"))
+    last = _to_float(night.get("Last"))
+    if np.isnan(base) or np.isnan(last):
+        return {}
+    return {"date": day.get("Date"), "day_settle": base, "night_last": last, "night_pct": (last / base - 1) * 100}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_taifex_foreign_oi():
+    """外資台指期淨未平倉口數 (負數 = 淨空單)"""
+    try:
+        rows = requests.get("https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate",
+                            timeout=20).json()
+        row = next(r for r in rows if r.get("ContractCode") == "臺股期貨" and "外資" in r.get("Item", ""))
+        return {"date": row.get("Date"), "net_oi": _to_float(row.get("OpenInterest(Net)"))}
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_t86(date_str):
+    """證交所三大法人買賣超日報 (上市，單日全部股票)：代號 → (外資, 投信, 自營商) 買賣超股數"""
+    # 失敗時直接拋出例外 (不會被快取)，由呼叫端處理；例如當天資料尚未公布
+    time.sleep(0.8)  # 證交所有流量限制
+    j = requests.get("https://www.twse.com.tw/rwd/zh/fund/T86",
+                     params={"date": date_str, "selectType": "ALLBUT0999", "response": "json"}, timeout=20).json()
+    f = j["fields"]
+    i_code, i_fi, i_it, i_dl = f.index("證券代號"), f.index("外陸資買賣超股數(不含外資自營商)"), f.index("投信買賣超股數"), f.index("自營商買賣超股數")
+    return {r[i_code].strip(): (_to_float(r[i_fi]), _to_float(r[i_it]), _to_float(r[i_dl])) for r in j.get("data", [])}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_tpex_insti():
+    """櫃買中心三大法人買賣超 (上櫃，最新一日)"""
+    try:
+        rows = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading", timeout=20).json()
+    except Exception:
+        return {}
+    result = {}
+    for r in rows:
+        fi = next((v for k, v in r.items() if "Foreign" in k and "Difference" in k and "Dealers" not in k), None)
+        result[r.get("SecuritiesCompanyCode", "").strip()] = (
+            _to_float(fi), _to_float(r.get("SecuritiesInvestmentTrustCompanies-Difference")), _to_float(r.get("Dealers-Difference")))
+    return result
+
+
+def load_institutional(code, trade_dates):
+    """個股近幾日三大法人買賣超：[(日期, 外資, 投信, 自營商)]，由舊到新"""
+    stock_no = code.split('.')[0]
+    if code.endswith(".TWO"):
+        v = load_tpex_insti().get(stock_no)
+        return [(trade_dates[-1], *v)] if v else []
+    rows = []
+    for d in trade_dates[-5:]:
+        try:
+            v = load_t86(d.strftime("%Y%m%d")).get(stock_no)
+        except Exception:
+            continue
+        if v:
+            rows.append((d, *v))
+    return rows
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_margin():
+    """融資餘額 (最新一日)：代號 → (前日餘額, 今日餘額)，單位：張"""
+    result = {}
+    try:
+        for r in requests.get("https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN", timeout=20).json():
+            result[r.get("股票代號", "").strip() + ".TW"] = (_to_float(r.get("融資前日餘額")), _to_float(r.get("融資今日餘額")))
+    except Exception:
+        pass
+    try:
+        for r in requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance", timeout=20).json():
+            result[r.get("SecuritiesCompanyCode", "").strip() + ".TWO"] = (
+                _to_float(r.get("MarginPurchaseBalancePreviousDay")), _to_float(r.get("MarginPurchaseBalance")))
+    except Exception:
+        pass
+    return result
+
+
+POSITIVE_WORDS = ["大漲", "上漲", "勁揚", "創高", "新高", "利多", "看好", "調升", "上修", "買超", "強勢", "反彈",
+                  "飆", "漲停", "樂觀", "降息", "報喜", "優於預期", "爆單", "滿載"]
+NEGATIVE_WORDS = ["大跌", "下跌", "重挫", "暴跌", "利空", "下修", "調降", "賣超", "衰退", "崩", "跌停", "悲觀",
+                  "升息", "制裁", "戰爭", "衝突", "砍單", "低於預期", "示警", "恐慌"]
+
+
+def news_sentiment(items):
+    """新聞標題關鍵字情緒：正面詞 +1、負面詞 -1"""
+    score = 0
+    for n in items:
+        score += sum(w in n["title"] for w in POSITIVE_WORDS) - sum(w in n["title"] for w in NEGATIVE_WORDS)
+    return score
 
 
 MARKET_INDICES = {
@@ -808,6 +945,139 @@ def assess_risk(d, adj, pe_pct=np.nan, pe_vs_peer=np.nan):
             "bias": bias, "bias_pct": bias_pct, "bias_text": bias_text}
 
 
+SEMI_TECH_INDUSTRIES = {"半導體業", "電腦及週邊設備業", "電子零組件業", "光電業", "其他電子業", "通信網路業",
+                        "電子通路業", "資訊服務業"}
+TSMC_HEAVY_ETFS = {"0050.TW": 0.6, "006208.TW": 0.6}
+
+
+def build_nextday_signals(code, name, d, stat_p):
+    """隔天多因子訊號：每個因子換算成「上漲機率」的加減分 (百分點)。
+    權重為經驗設定 (ADR、夜盤影響最大)，尚未經回測校準。"""
+    signals = []  # (因子, 數據, 解讀, 加減分)
+    tw_last = d.index[-1].date()
+    tw_close_time = datetime(tw_last.year, tw_last.month, tw_last.day, 13, 30, tzinfo=TAIPEI)
+    industry = industry_of(code)
+    is_etf = code.split('.')[0].startswith("00")
+    is_tech = industry in SEMI_TECH_INDUSTRIES or code in TSMC_HEAVY_ETFS
+    tsmc_link = 1.0 if code == "2330.TW" else TSMC_HEAVY_ETFS.get(code, 0.4 if industry == "半導體業" else 0.2)
+    us = load_us_overnight()
+
+    def us_after_close(sym):
+        return sym in us and us[sym]["date"] >= tw_last
+
+    def verdict(pts):
+        return "偏多" if pts > 0.5 else "偏空" if pts < -0.5 else "中性"
+
+    # 1. 台積電 ADR (台股收盤後的美股交易)
+    if "TSM" in us:
+        a = us["TSM"]
+        data = f"{a['date']:%m/%d} {a['chg']:+.2f}%"
+        if code == "2330.TW" and "TWD=X" in us:
+            premium = (a["close"] * us["TWD=X"]["close"] / 5 / float(d['Close'].iloc[-1]) - 1) * 100
+            data += f"，ADR 溢價 {premium:+.1f}%"
+        if us_after_close("TSM"):
+            pts = float(np.clip(a["chg"] * 4 * tsmc_link, -15, 15))
+            signals.append(("🌙 台積電 ADR", data, f"台股收盤後 ADR {'上漲' if a['chg'] > 0 else '下跌'}，連動度 {tsmc_link:.0%}", pts))
+        else:
+            signals.append(("🌙 台積電 ADR", data, "尚無台股收盤後的美股交易", 0.0))
+
+    # 2. 台指期夜盤
+    night = load_taifex_night()
+    if night:
+        w = 1.0 if is_etf else 0.5 if code == "2330.TW" else 0.6
+        fresh = night["date"] == tw_last.strftime("%Y%m%d")
+        pts = float(np.clip(night["night_pct"] * 4 * w, -12, 12)) if fresh else 0.0
+        signals.append(("🌙 台指期夜盤", f"{night['night_last']:.0f}（較日盤結算 {night['night_pct']:+.2f}%）",
+                        "夜盤反映台股收盤後的國際行情" if fresh else "夜盤資料不是最新交易日", pts))
+
+    # 3. 美股指數 / 輝達
+    idx_sym = "^SOX" if is_tech else "^GSPC"
+    if idx_sym in us:
+        s = us[idx_sym]
+        pts = float(np.clip(s["chg"] * 1.5, -6, 6)) if us_after_close(idx_sym) else 0.0
+        signals.append((f"🇺🇸 {US_OVERNIGHT[idx_sym]}", f"{s['date']:%m/%d} {s['chg']:+.2f}%",
+                        "科技 / 半導體股連動美股費半" if is_tech else "一般股參考 S&P 500", pts))
+    if is_tech and "NVDA" in us:
+        s = us["NVDA"]
+        pts = float(np.clip(s["chg"] * 0.8, -4, 4)) if us_after_close("NVDA") else 0.0
+        signals.append(("🇺🇸 輝達", f"{s['date']:%m/%d} {s['chg']:+.2f}%", "AI 供應鏈風向指標", pts))
+    if "^VIX" in us:
+        v = us["^VIX"]
+        pts = -3.0 if v["chg"] > 10 else 2.0 if v["chg"] < -10 else 0.0
+        if v["close"] > 30:
+            pts -= 2.0
+        signals.append(("😨 VIX 恐慌指數", f"{v['close']:.1f}（{v['chg']:+.1f}%）",
+                        "恐慌升溫" if pts < 0 else "恐慌降溫" if pts > 0 else "情緒平穩", pts))
+
+    # 4. 漲跌停
+    if not is_etf and len(d) >= 2:
+        chg = (float(d['Close'].iloc[-1]) / float(d['Close'].iloc[-2]) - 1) * 100
+        locked_up = chg >= 9.5 and float(d['Close'].iloc[-1]) >= float(d['High'].iloc[-1])
+        locked_dn = chg <= -9.5 and float(d['Close'].iloc[-1]) <= float(d['Low'].iloc[-1])
+        if chg >= 9.5:
+            signals.append(("🔒 漲停", f"今日 {chg:+.1f}%", "鎖死漲停，隔天開高機率高" if locked_up else "觸及漲停但打開，追價力道減弱",
+                            8.0 if locked_up else 3.0))
+        elif chg <= -9.5:
+            signals.append(("🔒 跌停", f"今日 {chg:+.1f}%", "鎖死跌停，賣壓延續機率高" if locked_dn else "觸及跌停後打開",
+                            -8.0 if locked_dn else -3.0))
+
+    # 5. 三大法人
+    insti = load_institutional(code, list(d.index[-5:]))
+    vol = float(d['Volume'].iloc[-1]) if 'Volume' in d.columns else np.nan
+    if insti and vol > 0:
+        _, fi, it, _dl = insti[-1]
+        fr, tr = fi / vol, it / vol
+        pts = 4.0 if fr > 0.10 else 2.0 if fr > 0.03 else -4.0 if fr < -0.10 else -2.0 if fr < -0.03 else 0.0
+        streak = 0
+        for row in reversed(insti):
+            if np.sign(row[1]) == np.sign(fi) and row[1] != 0:
+                streak += 1
+            else:
+                break
+        if streak >= 3:
+            pts += 2.0 * np.sign(fi)
+        signals.append(("💰 外資", f"{fi / 1000:+,.0f} 張（占成交量 {fr * 100:+.1f}%）" + (f"，連續 {streak} 天{'買' if fi > 0 else '賣'}超" if streak >= 2 else ""),
+                        "外資大買" if pts >= 2 else "外資大賣" if pts <= -2 else "外資動向不明顯", pts))
+        pts = 2.0 if tr > 0.02 else -2.0 if tr < -0.02 else 0.0
+        signals.append(("🏦 投信", f"{it / 1000:+,.0f} 張（占成交量 {tr * 100:+.1f}%）",
+                        "投信作多" if pts > 0 else "投信調節" if pts < 0 else "投信動向不明顯", pts))
+
+    # 6. 融資 (散戶情緒)
+    m = load_margin().get(code)
+    if m and m[0] and m[0] > 0 and len(d) >= 2:
+        mchg = (m[1] / m[0] - 1) * 100
+        up_today = d['Close'].iloc[-1] > d['Close'].iloc[-2]
+        pts = -2.0 if (mchg > 3 and up_today) else 1.0 if (mchg < -3 and not up_today) else 0.0
+        signals.append(("📊 融資", f"餘額 {m[1]:,.0f} 張（{mchg:+.1f}%）",
+                        "散戶融資追價，短線過熱" if pts < 0 else "融資退場，籌碼較乾淨" if pts > 0 else "融資變化不大", pts))
+
+    # 7. 外資台指期部位
+    oi = load_taifex_foreign_oi()
+    if oi and not np.isnan(oi.get("net_oi", np.nan)):
+        n = oi["net_oi"]
+        pts = -2.0 if n < -40000 else 2.0 if n > 10000 else 0.0
+        signals.append(("📉 外資台指期", f"淨未平倉 {n:+,.0f} 口", "外資大量空單避險" if pts < 0 else "外資偏多布局" if pts > 0 else "外資期貨部位中性", pts))
+
+    # 8. 夜間新聞 (台股收盤後)
+    def after_tw_close(items):
+        return [n for n in items if n.get("ts") and datetime.fromisoformat(n["ts"]) > tw_close_time]
+    night_market = after_tw_close(load_news("台股 OR 美股 OR 台積電 OR 費半 OR 聯準會", limit=15, days=2))
+    night_stock = after_tw_close(load_news(name, limit=10, days=2))
+    s_m, s_s = news_sentiment(night_market), news_sentiment(night_stock)
+    if night_market:
+        pts = float(np.clip(s_m, -3, 3))
+        signals.append(("📰 夜間市場新聞", f"{len(night_market)} 則，情緒分數 {s_m:+d}", "依標題關鍵字判讀", pts))
+    if night_stock:
+        pts = float(np.clip(s_s * 1.5, -4, 4))
+        signals.append((f"📰 夜間 {name} 新聞", f"{len(night_stock)} 則，情緒分數 {s_s:+d}", "依標題關鍵字判讀", pts))
+
+    total = sum(s[3] for s in signals)
+    final_p = float(np.clip(stat_p + total, 15, 85))
+    table = pd.DataFrame([{"因子": f, "數據": dt, "解讀": t, "影響": verdict(p), "加減分": round(p, 1)}
+                          for f, dt, t, p in signals])
+    return table, final_p, night_market + night_stock
+
+
 def ask_ai(provider, key, model, prompt, max_tokens=1500):
     if provider == "Claude":
         headers = {
@@ -1026,6 +1296,14 @@ try:
         })
     risk_board = pd.DataFrame(risk_board).sort_values("風險分數", ascending=False) if risk_board else pd.DataFrame()
     projection = compute_projection(long_adj, current_price) if len(long_adj) > 120 else pd.DataFrame()
+
+    # 隔天多因子訊號：統計機率 + 美股 / ADR / 夜盤 / 法人 / 融資 / 夜間新聞
+    stat_p_1d = float(projection.loc[projection["期間"] == "隔天", "上漲機率 (%)"].iloc[0]) \
+        if not projection.empty and (projection["期間"] == "隔天").any() else 50.0
+    try:
+        nextday_table, nextday_p, night_news = build_nextday_signals(stock_code, stock_name, df, stat_p_1d)
+    except Exception:
+        nextday_table, nextday_p, night_news = pd.DataFrame(), stat_p_1d, []
     history_years = len(long_adj) / 252
 
     levels = {
@@ -1137,6 +1415,12 @@ try:
 {season_text()}
 
 {etf_block}
+【隔天訊號（台股收盤後的國際行情與籌碼）】統計機率 {stat_p_1d:.0f}% → 綜合上漲機率 {nextday_p:.0f}%
+{nextday_table.to_string(index=False) if not nextday_table.empty else "（無資料）"}
+
+【台股收盤後的夜間新聞標題】
+{news_text(night_news)}
+
 【近 30 天潛在利空新聞標題（用利空關鍵字搜尋，需判斷是否真的與該股有關）】
 {news_text(bad_news)}
 
@@ -1227,25 +1511,40 @@ try:
         with col3:
             st.metric(label="60MA 季線乖離預警", value=f"{bias_60:+.2f}%", delta=bias_text, delta_color=bias_color)
 
-        # 隔天 / 隔週預估 (相似情境統計，詳見「🔮 未來走勢預估」)
+        # 隔天 (統計 + 多因子訊號) / 隔週 (相似情境統計) 預估
         if not projection.empty:
+            def direction_of(p):
+                return "📈 預計上漲" if p >= 55 else "📉 預計下跌" if p <= 45 else "➡️ 多空接近，偏盤整"
+
             f1, f2 = st.columns(2, gap="small")
-            for col, (label, period) in zip((f1, f2), [("隔天", "隔天"), ("1 週", "隔週（5 個交易日）")]):
-                row = projection[projection["期間"] == label]
-                if row.empty:
-                    continue
-                r = row.iloc[0]
+            # 隔天：由上漲機率反推預期漲跌 (常態近似：μ = σ × Φ⁻¹(p))
+            sigma_1d = float(np.log(long_adj).diff().iloc[-60:].std())
+            mu_1d = sigma_1d * NormalDist().inv_cdf(min(max(nextday_p, 1), 99) / 100)
+            target_1d = current_price * np.exp(mu_1d)
+            f1.metric("隔天預估（統計＋隔天訊號）", f"{direction_of(nextday_p)}（上漲機率 {nextday_p:.0f}%）",
+                      delta=f"{(target_1d / current_price - 1) * 100:+.2f}%，預估 {target_1d:.2f}"
+                            f"（±1σ {current_price * np.exp(mu_1d - sigma_1d):.2f} ~ {current_price * np.exp(mu_1d + sigma_1d):.2f}）")
+            week = projection[projection["期間"] == "1 週"]
+            if not week.empty:
+                r = week.iloc[0]
                 up_p = r["上漲機率 (%)"]
-                chg = (r["中位數"] / current_price - 1) * 100
-                if up_p >= 55:
-                    direction = "📈 預計上漲"
-                elif up_p <= 45:
-                    direction = "📉 預計下跌"
-                else:
-                    direction = "➡️ 多空接近，偏盤整"
-                col.metric(f"{period}預估", f"{direction}（上漲機率 {up_p:.0f}%）",
-                           delta=f"{chg:+.2f}%，中位數 {r['中位數']:.2f}（區間 {r['保守 (25%)']:.2f} ~ {r['樂觀 (75%)']:.2f}）")
-            st.caption("依歷史「相似情境」統計推估，短期漲跌接近擲硬幣，上漲機率 55% 以上才標示上漲、45% 以下才標示下跌；僅供參考。")
+                f2.metric("隔週預估（5 個交易日）", f"{direction_of(up_p)}（上漲機率 {up_p:.0f}%）",
+                          delta=f"{(r['中位數'] / current_price - 1) * 100:+.2f}%，中位數 {r['中位數']:.2f}"
+                                f"（區間 {r['保守 (25%)']:.2f} ~ {r['樂觀 (75%)']:.2f}）")
+            st.caption(f"隔天：歷史相似情境統計 {stat_p_1d:.0f}%，加上下方隔天訊號 {nextday_p - stat_p_1d:+.0f} 個百分點。"
+                       "隔週：相似情境統計。上漲機率 55% 以上標示上漲、45% 以下標示下跌；僅供參考。")
+
+        if not nextday_table.empty:
+            st.markdown("**🌙 隔天訊號面板**（美股夜盤、台積電 ADR、台指期夜盤、法人、融資、夜間新聞）")
+            st.dataframe(
+                nextday_table.style.apply(lambda r: [f"color: {'#E5484D' if r['加減分'] > 0 else '#30A46C' if r['加減分'] < 0 else MUTED}"
+                                                     if c in ('影響', '加減分') else "" for c in r.index], axis=1),
+                use_container_width=True, hide_index=True)
+            st.caption("加減分為對「隔天上漲機率」的影響（百分點，紅 = 偏多、綠 = 偏空，依台股慣例）。"
+                       "權重為經驗設定（ADR、夜盤影響最大），尚未經回測校準。")
+            if night_news:
+                with st.expander(f"📰 台股收盤後的夜間新聞（{len(night_news)} 則）"):
+                    show_news(night_news)
 
         st.subheader(f"🚦 {stock_name} 風險燈號：{risk['emoji']} {risk['level']}（分數 {risk['score']}）")
         if risk["items"]:
@@ -1421,7 +1720,7 @@ try:
         st.subheader(f"🧠 {stock_name} 綜合評估報告")
         st.caption(f"使用 {ai_provider} / {model_choice}。資料涵蓋新聞時事、國際局勢、技術分析、月份效應與估值；同一檔股票每天只自動產生一次，不重複計費。")
 
-        report_key = f"report_v5_{stock_code}_{today:%Y%m%d}_{model_choice}"
+        report_key = f"report_v6_{stock_code}_{today:%Y%m%d}_{model_choice}"
         c_auto, c_regen = st.columns([3, 1])
         auto_report = c_auto.toggle("選到股票時自動產生報告", value=True, key="auto_report")
         regenerate = c_regen.button("🔄 重新產生", use_container_width=True)
@@ -1468,7 +1767,8 @@ try:
    ## 🔮 七、未來走勢預估
    （綜合技術面、基本面、歷史報酬分布、月份效應與國際局勢，用表格列出：
     期間 | 預估區間（低～高） | 基準預估價 | 方向（偏漲 / 盤整 / 偏跌） | 信心（高 / 中 / 低） | 主要依據
-    期間分成 1 週、1 個月、1 年三列。
+    期間分成隔天、1 週、1 個月、1 年四列。
+    - 隔天：以「隔天訊號」為主（台積電 ADR、台指期夜盤、美股、法人、融資、夜間新聞），說明各訊號如何影響隔天開盤與收盤
     - 1 週：以技術面支撐壓力、目前波動度為主
     - 1 個月：技術面趨勢 + 月份效應 + 新聞與國際局勢
     - 1 年：以本益比推估合理價（優先用未來一年 EPS，成長股不可只用近四季 EPS）、歷史 1 年報酬分布與產業前景為主
