@@ -157,7 +157,7 @@ import stock_model as M
 
 # 替資料函式加上快取 (必須在 from stock_model import * 之前，才會拿到快取版本)
 _CACHE_TTL = {
-    "load_official_quotes": 600, "load_industry_map": 86400, "load_news": 1800, "load_etf_holdings": 86400,
+    "load_official_quotes": 600, "load_industry_map": 86400, "load_company_names": 86400, "load_news": 1800, "load_etf_holdings": 86400,
     "load_us_overnight": 900, "load_taifex_night": 900, "load_taifex_foreign_oi": 3600, "load_t86": 86400,
     "load_tpex_insti": 3600, "load_margin": 3600, "load_market_context": 1800, "load_seasonality": 86400,
     "load_long_history": 86400, "load_official_valuation": 3600, "load_yahoo_extras": 86400,
@@ -452,7 +452,7 @@ try:
     if is_etf:
         etf_holdings, etf_date = load_etf_holdings(stock_code)
     if not etf_holdings.empty:
-        name_to_code = {name: code for code, (name, _) in MARKET.items()}
+        name_to_code = {**load_company_names(), **{name: code for code, (name, _) in MARKET.items()}}
         top_rows = []
         for _, h in etf_holdings.head(10).iterrows():
             code = name_to_code.get(h["成分股"])

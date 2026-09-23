@@ -45,7 +45,7 @@ def load_official_quotes():
     ]
     for url, suffix, board, f in sources:
         try:
-            for row in requests.get(url, timeout=15).json():
+            for row in requests.get(url, timeout=30).json():
                 code = row.get(f["code"], "").strip()
                 if not pattern.match(code):
                     continue
@@ -98,6 +98,22 @@ def load_industry_map():
         except Exception:
             continue
     return industries
+
+
+def load_company_names():
+    """公司簡稱 → 代號 (證交所 / 櫃買中心公司基本資料)，用來把 ETF 成分股名稱對應到代號"""
+    names = {}
+    sources = [
+        ("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", ".TW", "公司代號", "公司簡稱"),
+        ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", ".TWO", "SecuritiesCompanyCode", "CompanyAbbreviation"),
+    ]
+    for url, suffix, code_key, name_key in sources:
+        try:
+            for row in requests.get(url, timeout=30).json():
+                names[str(row.get(name_key, "")).strip()] = str(row.get(code_key, "")).strip() + suffix
+        except Exception:
+            continue
+    return names
 
 
 def industry_of(code):

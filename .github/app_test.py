@@ -24,6 +24,13 @@ for code in ["2330.TW", "0050.TW"]:
     exceptions = [f"{e.message}\n{''.join(e.stack_trace) if e.stack_trace else ''}" for e in at.exception]
     metrics = "; ".join(f"{m.label}={m.value}" for m in at.metric[:14])
     note("notice", f"{code}: {len(at.metric)} 指標, {len(at.dataframe)} 表格, {len(at.tabs)} 分頁 | {metrics}")
+    for d in at.dataframe:
+        try:
+            v = d.value.data if hasattr(d.value, "data") else d.value  # Styler → DataFrame
+            if "成分股" in v.columns or "因子" in v.columns:
+                note("notice", f"{code} 表格:%0A{v.head(10).to_string()}")
+        except Exception:
+            pass
     for e in errors:
         note("error", f"{code} st.error: {e}")
     for e in exceptions:

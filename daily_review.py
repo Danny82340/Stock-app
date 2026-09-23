@@ -41,7 +41,7 @@ BIG_MOVE = 3.0          # 單日漲跌超過 3% 視為大波動，特別檢討
 AI_MODEL = "claude-sonnet-5"
 
 # 同一次執行內，全市場資料只抓一次 (避免對證交所重複請求被限流；例外不會被快取)
-for _name in ["load_official_quotes", "load_industry_map", "load_data", "load_news", "load_us_overnight",
+for _name in ["load_official_quotes", "load_industry_map", "load_company_names", "load_data", "load_news", "load_us_overnight",
               "load_taifex_night", "load_taifex_foreign_oi", "load_t86", "load_tpex_insti", "load_margin",
               "load_long_history", "load_monthly_revenue", "load_profitability", "load_holders", "load_sbl",
               "load_put_call", "load_dividend_calendar", "load_us_earnings"]:
