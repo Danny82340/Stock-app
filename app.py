@@ -102,9 +102,9 @@ STOCK_POOL = {
     "大盤市值與高股息": {"0050.TW": "元大台灣50", "0056.TW": "元大高股息", "00878.TW": "國泰永續高股息"}
 }
 DEFAULT_CATEGORIES = list(STOCK_POOL)
-NEW_GROUP = "➕ 建立新群組…"
+DEFAULT_MEMBERS = {cat: list(pool) for cat, pool in STOCK_POOL.items()}
 
-# 產業類別的 icon 與色塊 (自訂群組依序套用 GROUP_COLORS)
+# 產業類別的 icon 與色塊 (自動分類的產業依序套用 GROUP_COLORS)
 CATEGORY_STYLE = {
     "半導體先進封裝": ("🔬", "#4C8DFF"),
     "AI伺服器代工群": ("🖥️", "#9B6BFF"),
@@ -117,14 +117,14 @@ GROUP_COLORS = ["#FF8A4C", "#E5484D", "#30A46C", "#F5A524", "#00B8D9", "#D6409F"
 def category_style(cat):
     if cat in CATEGORY_STYLE:
         return CATEGORY_STYLE[cat]
-    return "📁", GROUP_COLORS[sum(map(ord, cat)) % len(GROUP_COLORS)]
+    return INDUSTRY_ICONS.get(cat, "📁"), GROUP_COLORS[sum(map(ord, cat)) % len(GROUP_COLORS)]
 
 # 自選股存檔 (重新啟動後仍保留)
 WATCHLIST_FILE = Path(__file__).parent / "watchlist.json"
 
 
 def load_watchlist():
-    """{"custom": {代號: {"name", "group"}}, "hidden": [被移除/移走的預設股票], "groups": [自訂群組]}"""
+    """{"custom": {代號: 名稱}, "hidden": [被移除的預設股票]}；分類由 classify() 自動決定"""
     try:
         data = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
@@ -132,12 +132,9 @@ def load_watchlist():
     if "custom" not in data:  # 最舊格式：整個檔案就是 {代號: 名稱}
         data = {"custom": data}
     data.setdefault("hidden", [])
-    data.setdefault("groups", [])
-    for code, info in list(data["custom"].items()):
-        if isinstance(info, str):  # 舊版「⭐ 自選股」→ 移到「我的股票」群組
-            data["custom"][code] = {"name": info, "group": "我的股票"}
-            if "我的股票" not in data["groups"]:
-                data["groups"].append("我的股票")
+    data.pop("groups", None)  # 舊版自訂群組已取消
+    data["custom"] = {code: (info["name"] if isinstance(info, dict) else info)
+                      for code, info in data["custom"].items()}
     return data
 
 
@@ -187,67 +184,87 @@ def load_market_list():
     return {code: (q["name"], q["board"]) for code, q in load_official_quotes().items()}
 
 
+# 證交所 / 櫃買中心產業別代碼
+INDUSTRY_NAMES = {
+    "01": "水泥工業", "02": "食品工業", "03": "塑膠工業", "04": "紡織纖維", "05": "電機機械", "06": "電器電纜",
+    "08": "玻璃陶瓷", "09": "造紙工業", "10": "鋼鐵工業", "11": "橡膠工業", "12": "汽車工業", "14": "建材營造業",
+    "15": "航運業", "16": "觀光餐旅", "17": "金融保險業", "18": "貿易百貨業", "19": "綜合", "20": "其他業",
+    "21": "化學工業", "22": "生技醫療業", "23": "油電燃氣業", "24": "半導體業", "25": "電腦及週邊設備業",
+    "26": "光電業", "27": "通信網路業", "28": "電子零組件業", "29": "電子通路業", "30": "資訊服務業",
+    "31": "其他電子業", "32": "文化創意業", "33": "農業科技業", "34": "電子商務", "35": "綠能環保",
+    "36": "數位雲端", "37": "運動休閒", "38": "居家生活", "91": "存託憑證",
+}
+INDUSTRY_ICONS = {
+    "半導體業": "🔬", "電腦及週邊設備業": "🖥️", "光電業": "💡", "通信網路業": "📡", "電子零組件業": "🔌",
+    "電子通路業": "📦", "資訊服務業": "💻", "其他電子業": "🔧", "金融保險業": "💰", "航運業": "🚢",
+    "鋼鐵工業": "🏗️", "生技醫療業": "💊", "電機機械": "⚙️", "汽車工業": "🚗", "食品工業": "🍜",
+    "塑膠工業": "🧪", "化學工業": "🧪", "建材營造業": "🏠", "綠能環保": "🌱", "油電燃氣業": "⛽", "ETF": "🏦",
+}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_industry_map():
+    """公司代號 → 產業別名稱 (證交所 / 櫃買中心公司基本資料)"""
+    industries = {}
+    sources = [
+        ("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", ".TW", "公司代號", "產業別"),
+        ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", ".TWO", "SecuritiesCompanyCode", "SecuritiesIndustryCode"),
+    ]
+    for url, suffix, code_key, ind_key in sources:
+        try:
+            for row in requests.get(url, timeout=30).json():
+                ind = str(row.get(ind_key, "")).strip().zfill(2)
+                industries[str(row.get(code_key, "")).strip() + suffix] = INDUSTRY_NAMES.get(ind, "其他")
+        except Exception:
+            continue
+    return industries
+
+
+def industry_of(code):
+    if code.split('.')[0].startswith("00"):
+        return "ETF"
+    return load_industry_map().get(code, "其他")
+
+
+def classify(code):
+    """新增的股票自動分類：若某個預設類別多數成員與它同產業，就放進該類別；否則以官方產業別當分類"""
+    industry = industry_of(code)
+    for cat, members in DEFAULT_MEMBERS.items():
+        same = sum(industry_of(c) == industry for c in members)
+        if same * 2 > len(members):
+            return cat
+    return industry
+
+
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
 WATCH = st.session_state.watchlist
 DEFAULT_STOCKS = {code: name for pool in STOCK_POOL.values() for code, name in pool.items()}
-DEFAULT_CATEGORY_OF = {code: cat for cat, pool in STOCK_POOL.items() for code in pool}
 STOCK_POOL = {cat: {c: n for c, n in pool.items() if c not in WATCH["hidden"]} for cat, pool in STOCK_POOL.items()}
-for g in WATCH["groups"]:
-    STOCK_POOL.setdefault(g, {})
-for code, info in WATCH["custom"].items():
-    STOCK_POOL.setdefault(info["group"], {})[code] = info["name"]
+for code, name in WATCH["custom"].items():  # 新增的股票依產業自動分類
+    STOCK_POOL.setdefault(classify(code), {})[code] = name
 ALL_STOCKS = {code: name for pool in STOCK_POOL.values() for code, name in pool.items()}
 CODE_TO_CATEGORY = {code: cat for cat, pool in STOCK_POOL.items() for code in pool}
 
 
-def _resolve_group(prefix):
-    """讀取「選擇群組 / 建立新群組」的選擇結果"""
-    group = st.session_state.get(f"{prefix}_group", DEFAULT_CATEGORIES[0])
-    if group == NEW_GROUP:
-        group = st.session_state.get(f"{prefix}_new_group", "").strip() or "未命名群組"
-    if group not in DEFAULT_CATEGORIES and group not in WATCH["groups"]:
-        WATCH["groups"].append(group)
-    return group
-
-
-def _place_code(code, name, group):
-    """把股票放進指定群組；預設股票放回原本類別就恢復，放到別的群組則從原類別隱藏"""
-    if code in DEFAULT_STOCKS and DEFAULT_CATEGORY_OF[code] == group:
-        if code in WATCH["hidden"]:
-            WATCH["hidden"].remove(code)
-        WATCH["custom"].pop(code, None)
-        return
-    if code in DEFAULT_STOCKS and code not in WATCH["hidden"]:
-        WATCH["hidden"].append(code)
-    WATCH["custom"][code] = {"name": name, "group": group}
-
-
 def add_to_watchlist():
-    group = _resolve_group("add")
     codes = [(c, MARKET[c][0]) for c in st.session_state.get("add_pick", [])]
     manual = st.session_state.get("add_manual", "").strip().upper()
     if manual:
         code = manual if "." in manual else manual + st.session_state.get("add_board", ".TW")
         codes.append((code, st.session_state.get("add_manual_name", "").strip() or code))
     for code, name in codes:
-        _place_code(code, name, group)
+        if code in DEFAULT_STOCKS:  # 之前移除的預設股票 → 回到原本類別
+            if code in WATCH["hidden"]:
+                WATCH["hidden"].remove(code)
+        else:
+            WATCH["custom"][code] = name
         st.session_state[f"chk_{code}"] = True
     save_watchlist(WATCH)
     st.session_state.add_pick = []
     st.session_state.add_manual = ""
     st.session_state.add_manual_name = ""
-    st.session_state.add_new_group = ""
-
-
-def move_selected():
-    group = _resolve_group("move")
-    for code in st.session_state.get("move_pick", []):
-        _place_code(code, ALL_STOCKS[code], group)
-    save_watchlist(WATCH)
-    st.session_state.move_pick = []
-    st.session_state.move_new_group = ""
 
 
 def remove_codes(codes):
@@ -263,7 +280,7 @@ def remove_codes(codes):
 def confirm_remove(code):
     st.markdown(f"確定要從「**{CODE_TO_CATEGORY[code]}**」移除 **{ALL_STOCKS[code]}（{code}）** 嗎？")
     if code in DEFAULT_STOCKS:
-        st.caption("這是預設股票，之後可以在「群組管理」按「還原預設股票」找回。")
+        st.caption("這是預設股票，之後可以在「新增股票」按「還原預設股票」找回。")
     c_yes, c_no = st.columns(2)
     if c_yes.button("確定移除", type="primary", use_container_width=True):
         remove_codes([code])
@@ -276,24 +293,8 @@ def toggle_pick(code):
     st.session_state[f"chk_{code}"] = not st.session_state.get(f"chk_{code}", False)
 
 
-def delete_group():
-    group = st.session_state.get("delete_group_pick")
-    if not group:
-        return
-    for code in list(STOCK_POOL.get(group, {})):
-        WATCH["custom"].pop(code, None)
-        if code in DEFAULT_STOCKS and code not in WATCH["hidden"]:
-            WATCH["hidden"].append(code)
-        st.session_state.pop(f"chk_{code}", None)
-    if group in WATCH["groups"]:
-        WATCH["groups"].remove(group)
-    save_watchlist(WATCH)
-
-
 def restore_defaults():
     WATCH["hidden"] = []
-    for code in DEFAULT_STOCKS:
-        WATCH["custom"].pop(code, None)
     save_watchlist(WATCH)
 
 
@@ -314,15 +315,13 @@ st.sidebar.caption("點一下股票即可選取（金色底 = 已選取），選
 
 # 各類別股票清單：點股票切換選取，右邊「−」移除 (會先跳出確認視窗)
 for cat, pool in STOCK_POOL.items():
-    if not pool and cat not in WATCH["groups"]:
+    if not pool:
         continue
     icon, color = category_style(cat)
     n_checked = sum(st.session_state.get(f"chk_{c}", False) for c in pool)
     title = cat if cat.startswith(icon) else f"{icon} {cat}"
     count = f'<span class="cat-count">已選 {n_checked}</span>' if n_checked else ""
     st.sidebar.html(f'<div class="cat-header" style="border-left-color:{color};">{title}{count}</div>')
-    if not pool:
-        st.sidebar.caption("（空群組，可在下方新增股票或移入股票）")
     for code, name in pool.items():
         picked = st.session_state.get(f"chk_{code}", False)
         c_pick, c_del = st.sidebar.columns([6, 1], gap="small", vertical_alignment="center")
@@ -365,29 +364,10 @@ with st.sidebar.expander("➕ 新增股票", expanded=True):
     st.text_input("股票名稱 (選填)", key="add_manual_name", placeholder="例如：聯發科")
     st.radio("市場", [".TW", ".TWO"], key="add_board", horizontal=True,
              format_func=lambda s: "上市 (.TW)" if s == ".TW" else "上櫃 (.TWO)")
-    group_options = list(STOCK_POOL) + [NEW_GROUP]
-    st.selectbox("📁 加入到哪個群組", group_options, key="add_group")
-    if st.session_state.get("add_group") == NEW_GROUP:
-        st.text_input("新群組名稱", key="add_new_group", placeholder="例如：我的存股、機器人概念")
+    st.caption("新增後會依證交所 / 櫃買中心的產業別自動歸類（例如聯發科 → 半導體類、ETF → 大盤市值與高股息）。")
     st.button("加入並選取", type="primary", on_click=add_to_watchlist, use_container_width=True)
-
-with st.sidebar.expander("📁 群組管理（移動股票 / 刪除群組）"):
     if WATCH["hidden"]:
-        st.button(f"↩️ 還原預設股票到原本類別（{len(WATCH['hidden'])} 檔）", on_click=restore_defaults, use_container_width=True)
-        st.markdown("---")
-    st.markdown("**🔀 把股票移到其他群組**")
-    st.multiselect("選擇股票 (可多選)", options=list(ALL_STOCKS),
-                   format_func=lambda c: f"{ALL_STOCKS[c]} ({c}) · {CODE_TO_CATEGORY[c]}", key="move_pick")
-    st.selectbox("移到群組", group_options, key="move_group")
-    if st.session_state.get("move_group") == NEW_GROUP:
-        st.text_input("新群組名稱", key="move_new_group", placeholder="例如：我的存股")
-    st.button("移動", on_click=move_selected, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("**🗑️ 刪除群組**")
-    st.selectbox("選擇群組", [g for g, pool in STOCK_POOL.items() if pool or g in WATCH["groups"]], key="delete_group_pick")
-    st.caption("群組內的股票會一併移除；預設類別可用「還原預設股票」找回。")
-    st.button("刪除這個群組", on_click=delete_group, use_container_width=True)
+        st.button(f"↩️ 還原被移除的預設股票（{len(WATCH['hidden'])} 檔）", on_click=restore_defaults, use_container_width=True)
 
 # AI設定區
 st.sidebar.markdown("---")
@@ -553,13 +533,19 @@ def load_long_history(code):
 FORECAST_HORIZONS = {"1 週": 5, "1 個月": 21, "1 年": 252}
 
 
+MARKET_LONG_RETURN = 0.07  # 股市長期平均年報酬的保守假設
+
+
 def compute_projection(adj, price):
-    """未來價格區間 (避免把過去多頭直接外推)：
+    """未來價格區間 (不直接外推過去多頭，也不假設零成長)：
     1. 相似情境：只取歷史上「季線乖離百分位相近 (±15%) 且季線方向相同」的日子，看它們之後的實際表現
-    2. 中性化：扣除整段歷史的平均漲幅 (漂移)，只保留「目前情境帶來的超額表現」與波動
-       → 過熱、跌破季線的股票，中位數會是負的
+    2. 基準報酬：先扣除該股過去的平均漲幅，再加回「一半用該股過去年化報酬、一半用市場長期 7%」
+       的基準成長 (上限 20%)，成長股保有合理成長、又不會把過去大多頭照抄到未來
     """
     rows = []
+    years = len(adj) / 252
+    hist_annual = float((adj.iloc[-1] / adj.iloc[0]) ** (1 / years) - 1) if years > 1 else MARKET_LONG_RETURN
+    base_annual = float(np.clip(0.5 * hist_annual + 0.5 * MARKET_LONG_RETURN, 0, 0.20))
     log_ret = np.log(adj).diff().dropna()
     sigma_d = float(log_ret.iloc[-60:].std()) if len(log_ret) >= 60 else np.nan
     ma60 = adj.rolling(60).mean()
@@ -574,7 +560,8 @@ def compute_projection(adj, price):
         fwd_sim = fwd_all[similar.reindex(fwd_all.index, fill_value=False)]
         use_sim = len(fwd_sim) >= max(30, h)
         fwd = fwd_sim if use_sim else fwd_all
-        neutral = (1 + fwd) / (1 + drift) - 1
+        base_h = (1 + base_annual) ** (h / 252) - 1
+        neutral = (1 + fwd) / (1 + drift) * (1 + base_h) - 1
         q = neutral.quantile([0.10, 0.25, 0.50, 0.75, 0.90])
         sig = sigma_d * np.sqrt(h)
         rows.append({
@@ -584,9 +571,10 @@ def compute_projection(adj, price):
             "中位數": price * (1 + q[0.50]),
             "樂觀 (75%)": price * (1 + q[0.75]),
             "極樂觀 (90%)": price * (1 + q[0.90]),
-            "上漲機率 (中性, %)": float((neutral > 0).mean() * 100),
+            "上漲機率 (%)": float((neutral > 0).mean() * 100),
             "若延續過去趨勢": price * (1 + float(fwd.median())),
             "過去平均漲幅 (%)": drift * 100,
+            "基準年化成長 (%)": base_annual * 100,
             "情境樣本": f"{len(fwd_sim)} 天" if use_sim else "不足，改用全部",
             "目前波動 ±1σ": f"{price * np.exp(-sig):.2f} ~ {price * np.exp(sig):.2f}" if not np.isnan(sig) else "—",
             "_days": h,
@@ -655,6 +643,8 @@ def load_yahoo_extras(code):
         result["市值 (億元)"] = round(info["marketCap"] / 1e8, 0)
     if isinstance(info.get("beta"), (int, float)):
         result["Beta"] = round(float(info["beta"]), 2)
+    if isinstance(info.get("forwardEps"), (int, float)) and info["forwardEps"] > 0:
+        result["預估 EPS（分析師共識）"] = round(float(info["forwardEps"]), 2)
     return result
 
 
@@ -1041,22 +1031,45 @@ try:
     supports = sorted([(v, k) for k, v in levels.items() if v < current_price], reverse=True)[:4]
     resistances = sorted([(v, k) for k, v in levels.items() if v > current_price])[:4]
 
+    # 本益比推估合理價：除了近四季 EPS，也用「未來一年 EPS」(成長股若只用過去 EPS 會嚴重低估)
     pe_targets = {}
+    eps_notes = []
     if not np.isnan(current_pe):
         eps_ttm = current_price / current_pe
+        eps_bases = [("近四季 EPS", eps_ttm)]
+        forward_eps = valuation.get("預估 EPS（分析師共識）")
+        eps_growth = np.nan
+        if len(pe_hist) > 150:  # 用每日本益比反推 EPS，估算近一年 EPS 成長率
+            eps_series = (df['Close'].reindex(pe_hist.index) / pe_hist).dropna()
+            if len(eps_series) > 100 and eps_series.iloc[0] > 0:
+                eps_growth = float(eps_series.iloc[-1] / eps_series.iloc[0] - 1)
+                eps_notes.append(f"近一年 EPS 成長 {eps_growth * 100:+.0f}%（由官方本益比反推）")
+        if forward_eps:
+            eps_bases.append(("預估 EPS（分析師共識）", forward_eps))
+            eps_notes.append(f"分析師預估未來 EPS {forward_eps:.2f}，較近四季 {eps_ttm:.2f} {'成長' if forward_eps >= eps_ttm else '衰退'} {abs(forward_eps / eps_ttm - 1) * 100:.0f}%")
+        elif not np.isnan(eps_growth):
+            g = float(np.clip(eps_growth, -0.5, 0.6))
+            eps_bases.append(("未來一年 EPS（延續近一年成長）", eps_ttm * (1 + g)))
+        pe_levels = []
         if not np.isnan(pe_pct):
-            for q, label in [(0.25, "歷史本益比 25 百分位"), (0.5, "歷史本益比中位數"), (0.75, "歷史本益比 75 百分位")]:
-                pe_q = float(pe_hist.quantile(q))
-                pe_targets[label] = (pe_q, eps_ttm * pe_q)
+            pe_levels += [(f"歷史本益比 {int(q * 100)} 百分位" if q != 0.5 else "歷史本益比中位數", float(pe_hist.quantile(q)))
+                          for q in (0.25, 0.5, 0.75)]
         if not np.isnan(peer_pe_median):
-            pe_targets["同類股本益比中位數"] = (peer_pe_median, eps_ttm * peer_pe_median)
+            pe_levels.append(("同類股本益比中位數", peer_pe_median))
+        if not pe_levels:
+            pe_levels.append(("目前本益比", current_pe))
+        for eps_label, eps in eps_bases:
+            for pe_label, pe in pe_levels:
+                if eps_label == "近四季 EPS" and pe_label == "目前本益比":
+                    continue  # 等於目前股價，沒有意義
+                pe_targets[f"{eps_label} × {pe_label}"] = (pe, eps * pe)
 
     def projection_text():
         if projection.empty:
             return "（歷史資料不足）"
         return "\n".join(
             f"- {r['期間']}：10%={r['悲觀 (10%)']:.2f}、25%={r['保守 (25%)']:.2f}、中位數={r['中位數']:.2f}、"
-            f"75%={r['樂觀 (75%)']:.2f}、90%={r['極樂觀 (90%)']:.2f}，中性上漲機率 {r['上漲機率 (中性, %)']:.0f}%；"
+            f"75%={r['樂觀 (75%)']:.2f}、90%={r['極樂觀 (90%)']:.2f}，上漲機率 {r['上漲機率 (%)']:.0f}%（已含基準年化成長 {r['基準年化成長 (%)']:.1f}%）；"
             f"若延續過去趨勢中位數 {r['若延續過去趨勢']:.2f}（過去平均漲幅 {r['過去平均漲幅 (%)']:+.1f}%，多頭期間不代表未來）；"
             f"相似情境樣本 {r['情境樣本']}；近 60 日波動度 ±1σ 區間 {r['目前波動 ±1σ']}"
             for _, r in projection.iterrows())
@@ -1099,6 +1112,7 @@ try:
 
 【估值】{"、".join(f"{k} {v}" for k, v in valuation.items()) or "（無資料）"}
 【本益比推估合理價】{"、".join(f"{k}（{pe:.1f} 倍）→ {p:.2f}" for k, (pe, p) in pe_targets.items()) or "（無資料）"}
+【EPS 成長】{"；".join(eps_notes) or "（無資料）"}（成長股應以未來 EPS 評估 1 年合理價，只用近四季 EPS 會低估）
 
 【支撐與壓力】
 - 支撐：{"、".join(f"{k} {v:.2f}" for v, k in supports) or "（無）"}
@@ -1142,14 +1156,16 @@ try:
             st.info("歷史資料不足，無法計算統計區間。")
         else:
             st.markdown(
-                f"**📊 中性情境區間**（近 {history_years:.1f} 年資料，以目前股價 {current_price:.2f} 為基準）\n"
+                f"**📊 基準情境區間**（近 {history_years:.1f} 年資料，以目前股價 {current_price:.2f} 為基準）\n"
                 "- 只取歷史上和現在**相似情境**（季線乖離位階相近、季線方向相同）的日子，看之後實際漲跌\n"
-                "- **扣除過去的平均漲幅**：過去 10 年台股大多頭，直接外推會讓每檔都看漲；中性化後只保留目前情境本身的多空影響\n"
-                "- 「若延續過去趨勢」欄位是不扣除的版本，僅供對照")
+                "- **不照抄過去的大多頭，也不假設零成長**：先扣除該股過去的平均漲幅，再加回「一半用該股過去年化報酬、"
+                "一半用市場長期平均 7%」的基準成長（上限 20%）\n"
+                "- 「若延續過去趨勢」欄位是完全照過去走勢的版本，僅供對照")
             show = projection.drop(columns=["_days"]).copy()
             for col in ["悲觀 (10%)", "保守 (25%)", "中位數", "樂觀 (75%)", "極樂觀 (90%)", "若延續過去趨勢"]:
                 show[col] = show[col].map(lambda p: f"{p:.2f}（{(p / current_price - 1) * 100:+.1f}%）")
-            show["上漲機率 (中性, %)"] = show["上漲機率 (中性, %)"].round(0)
+            show["上漲機率 (%)"] = show["上漲機率 (%)"].round(0)
+            show["基準年化成長 (%)"] = show["基準年化成長 (%)"].round(1)
             show["過去平均漲幅 (%)"] = show["過去平均漲幅 (%)"].round(1)
             st.dataframe(show, use_container_width=True, hide_index=True)
 
@@ -1184,11 +1200,13 @@ try:
         with pe_col:
             st.markdown("**💰 本益比推估合理價**")
             if not pe_targets:
-                st.markdown("- 無本益比資料（ETF 或虧損），或請先到總覽載入近一年本益比區間")
+                st.markdown("- 無本益比資料（ETF 或虧損）")
+            for note in eps_notes:
+                st.caption(f"📈 {note}")
             for k, (pe, p) in pe_targets.items():
-                st.markdown(f"- {k} {pe:.1f} 倍 → **{p:.2f}**（{(p / current_price - 1) * 100:+.1f}%）")
-            if pe_targets:
-                st.caption("假設近四季 EPS 不變；實際要看未來獲利成長。")
+                st.markdown(f"- {k}（{pe:.1f} 倍）→ **{p:.2f}**（{(p / current_price - 1) * 100:+.1f}%）")
+            if pe_targets and not eps_notes:
+                st.caption("目前只有近四季 EPS。到總覽按「載入近一年本益比區間」可算出 EPS 成長率，1 年合理價會更準。")
 
     # ── 總覽 ──
     with tab_overview:
@@ -1374,7 +1392,7 @@ try:
         st.subheader(f"🧠 {stock_name} 綜合評估報告")
         st.caption(f"使用 {ai_provider} / {model_choice}。資料涵蓋新聞時事、國際局勢、技術分析、月份效應與估值；同一檔股票每天只自動產生一次，不重複計費。")
 
-        report_key = f"report_v4_{stock_code}_{today:%Y%m%d}_{model_choice}"
+        report_key = f"report_v5_{stock_code}_{today:%Y%m%d}_{model_choice}"
         c_auto, c_regen = st.columns([3, 1])
         auto_report = c_auto.toggle("選到股票時自動產生報告", value=True, key="auto_report")
         regenerate = c_regen.button("🔄 重新產生", use_container_width=True)
@@ -1424,8 +1442,8 @@ try:
     期間分成 1 週、1 個月、1 年三列。
     - 1 週：以技術面支撐壓力、目前波動度為主
     - 1 個月：技術面趨勢 + 月份效應 + 新聞與國際局勢
-    - 1 年：以本益比推估合理價、歷史 1 年報酬分布與產業前景為主
-    「中性情境區間」已扣除過去多頭的平均漲幅，是預估的起點；「若延續過去趨勢」只是對照，不可直接當作預估。
+    - 1 年：以本益比推估合理價（優先用未來一年 EPS，成長股不可只用近四季 EPS）、歷史 1 年報酬分布與產業前景為主
+    「基準情境區間」已把過去的大多頭漲幅換成合理的基準成長（該股歷史與市場 7% 各半），是預估的起點；「若延續過去趨勢」只是對照，不可直接當作預估。
     不可預設看漲：依據利多與利空的強弱決定方向，技術面轉弱、估值偏高、利空新聞或產業趨勢不利時，應給出「偏跌」並寫出下跌目標價。
     表格下方逐期說明推論過程，並列出「若跌破 X 則轉弱、若站上 Y 則轉強」的關鍵價位。）
 2. 最後輸出「## 🧾 總結」：
