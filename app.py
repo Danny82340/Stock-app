@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 # 頁面基本設定
-st.set_page_config(page_title="台股 AI 戰情室", layout="wide")
+st.set_page_config(page_title="Stock analysis", layout="wide")
 
 # 主題色：深藍 + 暗金
 NAVY = "#0B1426"
@@ -102,7 +102,7 @@ st.html(f"""<style>
     .sector-badge .sub {{ color: {MUTED}; font-size: 0.8rem; }}
 </style>""")
 
-st.title("📈 2026 台股熱門爆量標的 AI 戰情室")
+st.title("📈 Stock analysis")
 
 # 股票池 (上市用 .TW、上櫃用 .TWO)
 STOCK_POOL = {
@@ -382,6 +382,58 @@ def latest_model_calls():
     return {r["code"]: (r["final_p"], r.get("week_p", np.nan)) for _, r in p.iterrows()}
 
 
+def render_buy_ranking(table, calls):
+    """今日買進參考排名：依每日檢討最新預測排序，並附 20 年回測的歷史勝率 (區分跳空與實際可交易)"""
+    st.subheader("🏆 今日買進參考排名（數據分析）")
+    ranked = []
+    for _, r in table.iterrows():
+        day_p, week_p = calls.get(r["code"], (None, None))
+        if day_p is None or pd.isna(day_p):
+            continue
+        week_p = 50.0 if week_p is None or pd.isna(week_p) else float(week_p)
+        signal = "✅ 偏多" if day_p >= 55 and week_p >= 52 else "⚠️ 偏空" if day_p <= 45 and week_p <= 48 else "➖ 觀望"
+        ranked.append({"code": r["code"], "股票": r["股票"], "參考訊號": signal, "隔天上漲機率": float(day_p), "1 週上漲機率": week_p,
+                       "_order": {"✅ 偏多": 0, "➖ 觀望": 1, "⚠️ 偏空": 2}[signal]})
+    if not ranked:
+        st.caption("尚無模型預測。每日檢討會在交易日早上 07:00（開盤前）自動產生，之後這裡就會顯示排名。")
+        return
+    rank = pd.DataFrame(ranked).sort_values(["_order", "隔天上漲機率", "1 週上漲機率"], ascending=[True, False, False])
+    win_path = DATA_DIR / "backtest" / "win_rates.json"
+    wins = json.loads(win_path.read_text(encoding="utf-8")) if win_path.exists() else {}
+    buckets = wins.get("buckets", {})
+
+    def bucket_of(p):
+        for label, lo, hi in [("≥ 65%", 65, 101), ("60~65%", 60, 65), ("55~60%", 55, 60), ("45~55%", 45, 55), ("< 45%", 0, 45)]:
+            if lo <= p < hi:
+                return buckets.get(label, {})
+        return {}
+
+    pct = lambda v: f"{v * 100:.1f}%" if v is not None else "—"
+    rows = []
+    for i, r in enumerate(rank.to_dict("records"), 1):
+        b = bucket_of(r["隔天上漲機率"])
+        rows.append({"排名": i, "股票": r["股票"], "參考訊號": r["參考訊號"],
+                     "隔天上漲機率": f"{r['隔天上漲機率']:.0f}%", "1 週上漲機率": f"{r['1 週上漲機率']:.0f}%",
+                     "歷史勝率：收盤→隔天收盤": pct(b.get("win_gap")),
+                     "歷史勝率：開盤買、當天賣": pct(b.get("win_oc1")),
+                     "歷史勝率：開盤買、抱 2 天": pct(b.get("win_oc2")),
+                     "抱 2 天平均報酬（未扣成本）": f"{b['avg_oc2']:+.2f}%" if b.get("avg_oc2") is not None else "—",
+                     "歷史樣本": b.get("n", 0)})
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    sig = wins.get("signals", {})
+    if sig:
+        bull, allx = sig.get("偏多", {}), sig.get("全部", {})
+        st.warning(
+            "**如何解讀勝率（20 年回測，13 檔、約 1 萬個樣本）**\n\n"
+            f"- **收盤→隔天收盤**：模型真正預測到的部分。「偏多」時 {pct(bull.get('win_gap'))}，全部平均 {pct(allx.get('win_gap'))}。"
+            "但模型要等美股收盤後（早上）才算得出來，**你買不到前一天的收盤價**。\n"
+            f"- **開盤買進**：你實際能做到的。「偏多」時當天賣勝率 {pct(bull.get('win_oc1'))}、抱 2 天 {pct(bull.get('win_oc2'))}，"
+            f"全部平均分別是 {pct(allx.get('win_oc1'))}、{pct(allx.get('win_oc2'))}。偏多時略好，但幾乎等於擲硬幣，"
+            f"而且平均報酬（{bull.get('avg_oc2', 0):+.2f}%）遠低於一趟交易成本約 {wins.get('cost_round_trip_pct', 0.47)}%。\n\n"
+            "排名是依模型數據排序的**分析參考**，不是投資建議；統計上照著短線買賣並沒有優勢。", icon="⚠️")
+
+
 def render_home():
     st.header("🏠 我的選股一覽")
     codes = tuple(ALL_STOCKS)
@@ -434,6 +486,8 @@ def render_home():
     m2.metric("平均漲跌", f"{table['當日 %'].mean():+.2f}%", delta=f"當月平均 {table['當月 %'].mean():+.2f}%")
     m3.metric("今日最強", best["股票"], delta=f"{best['當日 %']:+.2f}%")
     m4.metric("今日最弱", worst["股票"], delta=f"{worst['當日 %']:+.2f}%")
+
+    render_buy_ranking(table, calls)
 
     period = st.radio("📊 漲跌排行期間", ["當日 %", "當月 %", "3 個月 %", "半年 %", "1 年 %", "5 年 %"],
                       horizontal=True, key="home_period", format_func=lambda c: c.replace(" %", ""))

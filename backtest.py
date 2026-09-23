@@ -312,6 +312,54 @@ def fit_horizon_models(df, split):
     return models, lines
 
 
+# ─────────────── 首頁「買進參考排名」用的歷史勝率 (區分跳空與實際可交易) ───────────────
+WIN_BUCKETS = [("≥ 65%", 65, 101), ("60~65%", 60, 65), ("55~60%", 55, 60), ("45~55%", 45, 55), ("< 45%", 0, 45)]
+
+
+def tradable_win_rates(df, models):
+    """依隔天上漲機率分組，計算三種勝率：
+    - 跳空：前日收盤 → 隔天收盤 (模型真正預測到的，但收盤後才有預測，實際買不到這個價)
+    - 開盤買當天賣：隔天開盤 → 隔天收盤
+    - 開盤買抱 2 天：隔天開盤 → 兩天後收盤"""
+    rows = []
+    week = models.get("1 週", {})
+    for code, g in df.groupby("code"):
+        h = M._flatten(yf.download(code, start="2005-01-01", auto_adjust=False, progress=False)).dropna(subset=["Open", "Close"])
+        h = h[(h["Open"] > 0) & (h["Close"] > 0)]
+        ratio = h["Adj Close"] / h["Close"]
+        o, c = h["Open"] * ratio, h["Adj Close"]
+        idx = pd.DatetimeIndex(h.index).normalize()
+        for _, r in g.iterrows():
+            i = idx.searchsorted(pd.Timestamp(r["date"]))
+            if i + 2 >= len(h) or idx[i] != pd.Timestamp(r["date"]):
+                continue
+            z = week.get("intercept", 0) + sum(v * (r.get(f"c1w_{k}", 0) or 0) / 10 for k, v in week.get("coef", {}).items())
+            rows.append({"p": r["p_1d"], "week_p": 100 / (1 + np.exp(-z)) if week.get("mode") == "model" else np.nan,
+                         "gap": (c.iloc[i + 1] / c.iloc[i] - 1) * 100,
+                         "oc1": (c.iloc[i + 1] / o.iloc[i + 1] - 1) * 100,
+                         "oc2": (c.iloc[i + 2] / o.iloc[i + 1] - 1) * 100})
+    d = pd.DataFrame(rows)
+
+    def summarize(part):
+        out = {"n": int(len(part))}
+        for col in ("gap", "oc1", "oc2"):
+            x = part[col][part[col] != 0]
+            out[f"win_{col}"] = float((x > 0).mean()) if len(x) else None
+            out[f"avg_{col}"] = float(part[col].mean()) if len(part) else None
+        return out
+
+    result = {"buckets": {}, "signals": {}}
+    for label, lo, hi in WIN_BUCKETS:
+        result["buckets"][label] = summarize(d[(d["p"] >= lo) & (d["p"] < hi)])
+    wp = d["week_p"].fillna(50)
+    result["signals"]["偏多"] = summarize(d[(d["p"] >= 55) & (wp >= 52)])
+    result["signals"]["觀望"] = summarize(d[~((d["p"] >= 55) & (wp >= 52)) & ~((d["p"] <= 45) & (wp <= 48))])
+    result["signals"]["偏空"] = summarize(d[(d["p"] <= 45) & (wp <= 48)])
+    result["signals"]["全部"] = summarize(d)
+    result["cost_round_trip_pct"] = 0.47
+    return result
+
+
 def fmt(x, pct=True, digits=1):
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return "—"
@@ -445,6 +493,7 @@ def main():
     models, lines = fit_horizon_models(df, ARGS.split)
     report += "\n\n" + "\n".join(lines)
     (M.DATA_DIR / "horizon_model.json").write_text(json.dumps(models, ensure_ascii=False, indent=2), encoding="utf-8")
+    (OUT_DIR / "win_rates.json").write_text(json.dumps(tradable_win_rates(df, models), ensure_ascii=False, indent=2), encoding="utf-8")
     (OUT_DIR / "report.md").write_text(report, encoding="utf-8")
     print(report)
 
@@ -454,7 +503,8 @@ def refit_only():
     df = pd.read_csv(OUT_DIR / "samples.csv")
     models, lines = fit_horizon_models(df, ARGS.split)
     (M.DATA_DIR / "horizon_model.json").write_text(json.dumps(models, ensure_ascii=False, indent=2), encoding="utf-8")
-    report = (OUT_DIR / "report.md").read_text(encoding="utf-8").split("\n\n## 8.")[0]
+    (OUT_DIR / "win_rates.json").write_text(json.dumps(tradable_win_rates(df, models), ensure_ascii=False, indent=2), encoding="utf-8")
+    report =(OUT_DIR / "report.md").read_text(encoding="utf-8").split("\n\n## 8.")[0]
     (OUT_DIR / "report.md").write_text(report + "\n\n" + "\n".join(lines), encoding="utf-8")
     print("\n".join(lines))
 
