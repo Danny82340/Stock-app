@@ -153,7 +153,15 @@ def save_watchlist(watchlist):
 
 
 # ─────────────── 模型與資料 (stock_model.py，與每日檢討共用) ───────────────
+import importlib
+import os
 import stock_model as M
+
+# Streamlit Cloud 更新程式時只會重跑 app.py，已載入的 stock_model 可能還是舊版 → 檔案有變就重新載入
+_model_mtime = os.path.getmtime(M.__file__)
+if getattr(M, "_loaded_mtime", _model_mtime) != _model_mtime:
+    M = importlib.reload(M)
+M._loaded_mtime = _model_mtime
 
 # 替資料函式加上快取 (必須在 from stock_model import * 之前，才會拿到快取版本)
 _CACHE_TTL = {
@@ -383,7 +391,17 @@ def render_home():
     with st.spinner("載入所有選股的最新行情 ..."):
         hist = load_batch_history(codes, period="10y")
     calls = latest_model_calls()
-    arrow = lambda p: "—" if p is None or pd.isna(p) else f"{'📈' if p >= 55 else '📉' if p <= 45 else '➡️'} {p:.0f}%"
+    def buy_reference(day_p, week_p):
+        """買進參考：隔天與 1 週模型同向才表態，否則觀望 (數據分析參考，非投資建議)"""
+        if day_p is None or pd.isna(day_p):
+            return "— 尚無資料"
+        week_p = 50.0 if week_p is None or pd.isna(week_p) else week_p
+        detail = f"（隔天 {day_p:.0f}%／1 週 {week_p:.0f}%）"
+        if day_p >= 55 and week_p >= 52:
+            return "✅ 偏多" + detail
+        if day_p <= 45 and week_p <= 48:
+            return "⚠️ 偏空" + detail
+        return "➖ 觀望" + detail
     def ret_since(s, offset=None, month_start=False):
         """以日曆日計算報酬：當月 = 相對上個月最後一個交易日；其他 = 相對 N 個月前最近的交易日"""
         cutoff = s.index[-1].replace(day=1) if month_start else s.index[-1] - offset
@@ -403,7 +421,7 @@ def render_home():
                      "3 個月 %": ret_since(s, pd.DateOffset(months=3)), "半年 %": ret_since(s, pd.DateOffset(months=6)),
                      "1 年 %": ret_since(s, pd.DateOffset(years=1)), "5 年 %": ret_since(s, pd.DateOffset(years=5)),
                      "近 3 月走勢": [float(v) for v in s.iloc[-63:]],
-                     "隔天模型": arrow(call[0]), "1 週模型": arrow(call[1]), "資料日": s.index[-1].strftime("%m/%d")})
+                     "買進參考（數據分析）": buy_reference(*call), "資料日": s.index[-1].strftime("%m/%d")})
     if not rows:
         st.warning("暫時抓不到行情資料，請稍後重新整理。")
         return
@@ -427,7 +445,12 @@ def render_home():
     fig.update_layout(showlegend=False, hovermode="closest", margin=dict(l=10, r=40, t=20, b=20))
     st.plotly_chart(fig, width="stretch")
 
-    st.caption("紅 = 上漲、綠 = 下跌（台股慣例）。「隔天 / 1 週模型」來自每日檢討最新一次預測。👉 點選任一列可直接進入該股的個股分析。")
+    st.caption("紅 = 上漲、綠 = 下跌（台股慣例）。👉 點選任一列可直接進入該股的個股分析。")
+    st.info("**「買進參考（數據分析）」怎麼判斷**：取每日檢討（開盤前 07:00）最新一次模型預測，"
+            "隔天上漲機率 ≥55% 且 1 週 ≥52% → ✅ 偏多；隔天 ≤45% 且 1 週 ≤48% → ⚠️ 偏空；其餘 ➖ 觀望。\n\n"
+            "**請注意 20 年回測的結果**：這個訊號主要反映「開盤會跳高還是跳低」。若在隔天開盤後才買進，"
+            "偏多與偏空之後的平均報酬幾乎相同，扣除交易成本（約 0.47%）後沒有統計優勢。"
+            "僅供數據分析參考，不是投資建議，買賣請自行判斷風險。", icon="ℹ️")
     pct_cols = ["當日 %", "當月 %", "3 個月 %", "半年 %", "1 年 %", "5 年 %"]
     color = lambda v: f"color: {'#E5484D' if v > 0 else '#30A46C' if v < 0 else MUTED}" if pd.notna(v) else ""
     for i, (cat, g) in enumerate(table.groupby("分類", sort=False)):
@@ -816,7 +839,7 @@ try:
                                                           if col in ('判讀', '加減分') and pd.notna(r['加減分']) else "" for col in r.index], axis=1)
                                         .format({"加減分": lambda v: "—" if pd.isna(v) else f"{v:+.1f}"}),
                         width="stretch", hide_index=True)
-                    if c["removed"]:
+                    if c.get("removed"):
                         st.caption("🚫 已從模型篩除（與未來報酬相關性低 / 回測不顯著）：" + "、".join(dict.fromkeys(c["removed"])))
             st.caption("紅 = 偏多、綠 = 偏空（台股慣例）。只保留經 20 年回測與實盤驗證「與未來報酬正相關且顯著」的因子；"
                        "每週一重新檢定，失效的因子會自動移除、重新變顯著的會自動加回。")

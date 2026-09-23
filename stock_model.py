@@ -39,10 +39,10 @@ def load_official_quotes():
     sources = [
         ("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", ".TW", "上市",
          {"code": "Code", "name": "Name", "Open": "OpeningPrice", "High": "HighestPrice",
-          "Low": "LowestPrice", "Close": "ClosingPrice", "Volume": "TradeVolume"}),
+          "Low": "LowestPrice", "Close": "ClosingPrice", "Volume": "TradeVolume", "Change": "Change"}),
         ("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", ".TWO", "上櫃",
          {"code": "SecuritiesCompanyCode", "name": "CompanyName", "Open": "Open", "High": "High",
-          "Low": "Low", "Close": "Close", "Volume": "TradingShares"}),
+          "Low": "Low", "Close": "Close", "Volume": "TradingShares", "Change": "Change"}),
     ]
     for url, suffix, board, f in sources:
         try:
@@ -55,7 +55,7 @@ def load_official_quotes():
                     "name": row.get(f["name"], "").strip(),
                     "board": board,
                     "Date": pd.Timestamp(int(roc[:-4]) + 1911, int(roc[-4:-2]), int(roc[-2:])),
-                    **{k: _to_float(row.get(f[k])) for k in ["Open", "High", "Low", "Close", "Volume"]},
+                    **{k: _to_float(row.get(f[k])) for k in ["Open", "High", "Low", "Close", "Volume", "Change"]},
                 }
         except Exception:
             continue
@@ -78,12 +78,13 @@ def load_official_quotes():
             continue
         f = table["fields"]
         idx = {k: f.index(v) for k, v in [("code", "證券代號"), ("name", "證券名稱"), ("Open", "開盤價"), ("High", "最高價"),
-                                             ("Low", "最低價"), ("Close", "收盤價"), ("Volume", "成交股數")]}
+                                             ("Low", "最低價"), ("Close", "收盤價"), ("Volume", "成交股數"), ("sign", "漲跌(+/-)"), ("diff", "漲跌價差")]}
         for r in table["data"]:
             code = str(r[idx["code"]]).strip()
             if pattern.match(code):
                 quotes[code + ".TW"] = {"name": str(r[idx["name"]]).strip(), "board": "上市", "Date": pd.Timestamp(day),
-                                        **{k: _to_float(r[idx[k]]) for k in ["Open", "High", "Low", "Close", "Volume"]}}
+                                        **{k: _to_float(r[idx[k]]) for k in ["Open", "High", "Low", "Close", "Volume"]},
+                                        "Change": _to_float(r[idx["diff"]]) * (-1 if "-" in str(r[idx["sign"]]) else 1)}
         break
     return quotes
 
@@ -172,13 +173,33 @@ def load_data(code):
     return df
 
 
+def _official_prev_close(q, before):
+    """官方漲跌推算前一交易日收盤；若 Yahoo 最後一筆 (before 之前) 與它不符，回傳應補上的 (日期, 收盤)"""
+    change = q.get("Change", np.nan)
+    if change is None or np.isnan(change) or before is None or len(before) == 0:
+        return None
+    prev_close = q["Close"] - change
+    if abs(float(before.iloc[-1]) / prev_close - 1) < 0.001:  # Yahoo 前一天資料正確
+        return None
+    prev_day = q["Date"] - pd.tseries.offsets.BDay(1)
+    if prev_day <= before.index[-1]:  # 無法判斷缺哪一天 (可能遇到連假)，不補
+        return None
+    return prev_day, prev_close
+
+
 def get_price_data(code):
-    """Yahoo 歷史資料 + 交易所官方最新行情校正 (Yahoo 偶爾會缺某天或數字不同)"""
+    """Yahoo 歷史資料 + 交易所官方最新行情校正 (Yahoo 偶爾缺某天、收盤空白或數字不同)"""
     df = load_data(code).dropna(subset=['Close']).copy()
     q = load_official_quotes().get(code)
     if q is None or np.isnan(q["Close"]) or df.empty:
         return df
     cols = ["Open", "High", "Low", "Close", "Volume"]
+    fill = _official_prev_close(q, df.loc[df.index < q["Date"], "Close"])
+    if fill:  # Yahoo 缺了前一個交易日 → 用官方漲跌推回的收盤補上，漲跌才會算對
+        day, prev_close = fill
+        df.loc[day, cols] = [prev_close, prev_close, prev_close, prev_close, np.nan]
+        if "Adj Close" in df.columns:
+            df.loc[day, "Adj Close"] = prev_close
     is_new = q["Date"] not in df.index
     df.loc[q["Date"], cols] = [q[c] for c in cols]
     if is_new and "Adj Close" in df.columns:
@@ -202,6 +223,9 @@ def load_batch_history(codes, period="6mo"):
         s = raw[code].dropna()
         q = official.get(code)
         if q and not np.isnan(q["Close"]):
+            fill = _official_prev_close(q, s[s.index < q["Date"]])
+            if fill:  # Yahoo 缺前一交易日 → 用官方漲跌推回的收盤補上
+                s.loc[fill[0]] = fill[1]
             s.loc[q["Date"]] = q["Close"]  # 補上或覆蓋最新交易日
             s = s.sort_index()
         if len(s) >= 2:
