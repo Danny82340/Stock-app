@@ -69,8 +69,17 @@ st.html(f"""<style>
     }}
 
     /* 側邊欄股票按鈕：文字靠左；「−」移除鈕 hover 變紅 */
-    [class*="st-key-pick_"] button {{ justify-content: flex-start; text-align: left; padding-left: 12px; }}
-    [class*="st-key-del_"] button {{ padding: 0; min-height: 38px; font-size: 1.2rem; font-weight: 700; }}
+    [class*="st-key-pick_"] button {{
+        justify-content: flex-start; text-align: left;
+        min-height: 28px; height: 28px; padding: 0 10px; border-radius: 6px;
+    }}
+    [class*="st-key-pick_"] button p {{ font-size: 0.82rem; line-height: 1; }}
+    [class*="st-key-del_"] button {{
+        padding: 0; min-height: 28px; height: 28px; border-radius: 6px; font-size: 1rem; font-weight: 700;
+    }}
+    /* 側邊欄股票列之間的間距縮小 */
+    section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {{ margin-bottom: -10px; }}
+    section[data-testid="stSidebar"] .cat-header {{ font-size: 1.1rem; padding: 6px 10px; margin: 14px 0 6px 0; }}
     [class*="st-key-del_"] button:hover {{ background: #E5484D !important; color: white !important; border-color: #E5484D !important; }}
 
     /* 側邊欄產業大分類標題 */
@@ -530,7 +539,7 @@ def load_long_history(code):
         return pd.Series(dtype=float)
 
 
-FORECAST_HORIZONS = {"1 週": 5, "1 個月": 21, "1 年": 252}
+FORECAST_HORIZONS = {"隔天": 1, "1 週": 5, "1 個月": 21, "1 年": 252}
 
 
 MARKET_LONG_RETURN = 0.07  # 股市長期平均年報酬的保守假設
@@ -1217,6 +1226,26 @@ try:
             st.metric(label="KD 技術指標狀態", value=f"K:{current_k:.1f} / D:{current_d:.1f}", delta=kd_status, delta_color="normal")
         with col3:
             st.metric(label="60MA 季線乖離預警", value=f"{bias_60:+.2f}%", delta=bias_text, delta_color=bias_color)
+
+        # 隔天 / 隔週預估 (相似情境統計，詳見「🔮 未來走勢預估」)
+        if not projection.empty:
+            f1, f2 = st.columns(2, gap="small")
+            for col, (label, period) in zip((f1, f2), [("隔天", "隔天"), ("1 週", "隔週（5 個交易日）")]):
+                row = projection[projection["期間"] == label]
+                if row.empty:
+                    continue
+                r = row.iloc[0]
+                up_p = r["上漲機率 (%)"]
+                chg = (r["中位數"] / current_price - 1) * 100
+                if up_p >= 55:
+                    direction = "📈 預計上漲"
+                elif up_p <= 45:
+                    direction = "📉 預計下跌"
+                else:
+                    direction = "➡️ 多空接近，偏盤整"
+                col.metric(f"{period}預估", f"{direction}（上漲機率 {up_p:.0f}%）",
+                           delta=f"{chg:+.2f}%，中位數 {r['中位數']:.2f}（區間 {r['保守 (25%)']:.2f} ~ {r['樂觀 (75%)']:.2f}）")
+            st.caption("依歷史「相似情境」統計推估，短期漲跌接近擲硬幣，上漲機率 55% 以上才標示上漲、45% 以下才標示下跌；僅供參考。")
 
         st.subheader(f"🚦 {stock_name} 風險燈號：{risk['emoji']} {risk['level']}（分數 {risk['score']}）")
         if risk["items"]:
