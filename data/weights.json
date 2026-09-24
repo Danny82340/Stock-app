@@ -1,0 +1,176 @@
+{
+  "factors": {
+    "adr": 1.41,
+    "night": 1.0,
+    "us_index": 1.48,
+    "nvda": 1.43,
+    "vix": 1.81,
+    "limit": 1.44,
+    "foreign": 1.0,
+    "trust": 1.0,
+    "margin": 1.0,
+    "fut_oi": 1.0,
+    "news_market": 1.0,
+    "news_stock": 1.0,
+    "revenue": 1.0,
+    "holders": 1.0,
+    "sbl": 1.0,
+    "put_call": 1.0
+  },
+  "scale": 1.0,
+  "updated": "2026-09-24",
+  "samples": 0,
+  "factor_stats": {
+    "adr": {
+      "acc": 0.603,
+      "n": 14317,
+      "live_n": 0,
+      "r": 0.2679,
+      "t": 33.28,
+      "live_acc": null,
+      "weight": 1.41
+    },
+    "night": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "us_index": {
+      "acc": 0.621,
+      "n": 14331,
+      "live_n": 0,
+      "r": 0.2977,
+      "t": 37.32,
+      "live_acc": null,
+      "weight": 1.48
+    },
+    "nvda": {
+      "acc": 0.608,
+      "n": 10925,
+      "live_n": 0,
+      "r": 0.2541,
+      "t": 27.46,
+      "live_acc": null,
+      "weight": 1.43
+    },
+    "vix": {
+      "acc": 0.707,
+      "n": 2505,
+      "live_n": 0,
+      "r": 0.3629,
+      "t": 19.49,
+      "live_acc": null,
+      "weight": 1.81
+    },
+    "limit": {
+      "acc": 0.628,
+      "n": 250,
+      "live_n": 0,
+      "r": 0.2839,
+      "t": 4.66,
+      "live_acc": null,
+      "weight": 1.44
+    },
+    "foreign": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "trust": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "margin": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "fut_oi": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "news_market": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "news_stock": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "revenue": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "holders": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "sbl": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    },
+    "put_call": {
+      "acc": null,
+      "n": 0,
+      "live_n": 0,
+      "weight": 1.0
+    }
+  },
+  "previous_factors": {},
+  "previous_scale": 1.0,
+  "removed": {},
+  "week_removed": {},
+  "week_factors": {
+    "carry": 1.0,
+    "flows": 1.0,
+    "reversal": 1.0,
+    "bollinger": 1.0,
+    "sentiment": 1.0
+  },
+  "week_factor_stats": {
+    "carry": {
+      "acc": null,
+      "n": 0,
+      "weight": 1.0
+    },
+    "flows": {
+      "acc": null,
+      "n": 0,
+      "weight": 1.0
+    },
+    "reversal": {
+      "acc": null,
+      "n": 0,
+      "weight": 1.0
+    },
+    "bollinger": {
+      "acc": null,
+      "n": 0,
+      "weight": 1.0
+    },
+    "sentiment": {
+      "acc": null,
+      "n": 0,
+      "weight": 1.0
+    }
+  },
+  "week_samples": 0,
+  "previous_week_factors": {}
+}
