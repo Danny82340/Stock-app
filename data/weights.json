@@ -1,25 +1,25 @@
 {
   "factors": {
     "adr": 1.41,
-    "night": 0.76,
+    "night": 0.74,
     "us_index": 1.48,
     "nvda": 1.43,
     "vix": 1.81,
     "limit": 1.44,
-    "foreign": 1.08,
-    "trust": 0.96,
-    "margin": 1.05,
-    "fut_oi": 1.24,
-    "news_market": 0.76,
-    "news_stock": 0.87,
+    "foreign": 1.11,
+    "trust": 0.92,
+    "margin": 1.0,
+    "fut_oi": 1.26,
+    "news_market": 0.74,
+    "news_stock": 0.88,
     "revenue": 0.87,
     "holders": 1.0,
     "sbl": 1.05,
-    "put_call": 1.24
+    "put_call": 1.26
   },
   "scale": 1.0,
-  "updated": "2026-09-25",
-  "samples": 10,
+  "updated": "2026-09-28",
+  "samples": 13,
   "factor_stats": {
     "adr": {
       "acc": 0.603,
@@ -31,21 +31,21 @@
       "weight": 1.41
     },
     "night": {
-      "acc": 0.2,
-      "n": 10,
-      "live_n": 10,
-      "r": 0.0207,
-      "t": 0.06,
-      "live_acc": 0.2,
-      "weight": 0.76
+      "acc": 0.231,
+      "n": 13,
+      "live_n": 13,
+      "r": 0.2037,
+      "t": 0.69,
+      "live_acc": 0.231,
+      "weight": 0.74
     },
     "us_index": {
       "acc": 0.621,
-      "n": 14341,
-      "live_n": 10,
+      "n": 14344,
+      "live_n": 13,
       "r": 0.2975,
       "t": 37.32,
-      "live_acc": 0.3,
+      "live_acc": 0.308,
       "weight": 1.48
     },
     "nvda": {
@@ -76,58 +76,58 @@
       "weight": 1.44
     },
     "foreign": {
-      "acc": 0.6,
-      "n": 10,
-      "live_n": 10,
-      "r": -0.2523,
-      "t": -0.74,
-      "live_acc": 0.6,
-      "weight": 1.08
+      "acc": 0.615,
+      "n": 13,
+      "live_n": 13,
+      "r": -0.2983,
+      "t": -1.04,
+      "live_acc": 0.615,
+      "weight": 1.11
     },
     "trust": {
-      "acc": 0.429,
-      "n": 7,
-      "live_n": 7,
-      "r": -0.1809,
-      "t": -0.41,
-      "live_acc": 0.429,
-      "weight": 0.96
+      "acc": 0.375,
+      "n": 8,
+      "live_n": 8,
+      "r": -0.0749,
+      "t": -0.18,
+      "live_acc": 0.375,
+      "weight": 0.92
     },
     "margin": {
-      "acc": 1.0,
-      "n": 1,
-      "live_n": 1,
+      "acc": 0.5,
+      "n": 2,
+      "live_n": 2,
       "r": 0.0,
       "t": 0.0,
-      "live_acc": 1.0,
-      "weight": 1.05
+      "live_acc": 0.5,
+      "weight": 1.0
     },
     "fut_oi": {
-      "acc": 0.8,
-      "n": 10,
-      "live_n": 10,
+      "acc": 0.769,
+      "n": 13,
+      "live_n": 13,
       "r": 0.0,
       "t": 0.0,
-      "live_acc": 0.8,
-      "weight": 1.24
+      "live_acc": 0.769,
+      "weight": 1.26
     },
     "news_market": {
-      "acc": 0.2,
-      "n": 10,
-      "live_n": 10,
+      "acc": 0.231,
+      "n": 13,
+      "live_n": 13,
       "r": 0.0,
       "t": 0.0,
-      "live_acc": 0.2,
-      "weight": 0.76
+      "live_acc": 0.231,
+      "weight": 0.74
     },
     "news_stock": {
-      "acc": 0.286,
-      "n": 7,
-      "live_n": 7,
-      "r": -0.7967,
-      "t": -2.95,
-      "live_acc": 0.286,
-      "weight": 0.87
+      "acc": 0.333,
+      "n": 9,
+      "live_n": 9,
+      "r": -0.293,
+      "t": -0.81,
+      "live_acc": 0.333,
+      "weight": 0.88
     },
     "revenue": {
       "acc": 0.286,
@@ -154,32 +154,32 @@
       "weight": 1.05
     },
     "put_call": {
-      "acc": 0.8,
-      "n": 10,
-      "live_n": 10,
+      "acc": 0.769,
+      "n": 13,
+      "live_n": 13,
       "r": 0.0,
       "t": 0.0,
-      "live_acc": 0.8,
-      "weight": 1.24
+      "live_acc": 0.769,
+      "weight": 1.26
     }
   },
   "previous_factors": {
     "adr": 1.41,
-    "night": 1.0,
+    "night": 0.76,
     "us_index": 1.48,
     "nvda": 1.43,
     "vix": 1.81,
     "limit": 1.44,
-    "foreign": 1.0,
-    "trust": 1.0,
-    "margin": 1.0,
-    "fut_oi": 1.0,
-    "news_market": 1.0,
-    "news_stock": 1.0,
-    "revenue": 1.0,
+    "foreign": 1.08,
+    "trust": 0.96,
+    "margin": 1.05,
+    "fut_oi": 1.24,
+    "news_market": 0.76,
+    "news_stock": 0.87,
+    "revenue": 0.87,
     "holders": 1.0,
-    "sbl": 1.0,
-    "put_call": 1.0
+    "sbl": 1.05,
+    "put_call": 1.24
   },
   "previous_scale": 1.0,
   "removed": {},
