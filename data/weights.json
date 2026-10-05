@@ -1,60 +1,60 @@
 {
   "factors": {
     "adr": 1.41,
-    "night": 0.98,
+    "night": 0.0,
     "us_index": 1.48,
     "nvda": 1.43,
     "vix": 1.81,
     "limit": 1.42,
-    "foreign": 0.81,
-    "trust": 1.15,
+    "foreign": 0.76,
+    "trust": 1.06,
     "margin": 1.04,
-    "fut_oi": 1.11,
+    "fut_oi": 0.0,
     "news_market": 0.93,
-    "news_stock": 0.84,
-    "revenue": 0.97,
-    "holders": 1.18,
-    "sbl": 1.04,
+    "news_stock": 0.93,
+    "revenue": 0.95,
+    "holders": 1.2,
+    "sbl": 0.96,
     "put_call": 1.06
   },
   "scale": 0.2,
-  "updated": "2026-10-02",
-  "samples": 52,
+  "updated": "2026-10-05",
+  "samples": 65,
   "factor_stats": {
     "adr": {
       "acc": 0.603,
-      "n": 14343,
-      "live_n": 26,
+      "n": 14355,
+      "live_n": 38,
       "r": 0.2677,
       "t": 33.28,
-      "live_acc": 0.615,
+      "live_acc": 0.605,
       "weight": 1.41
     },
     "night": {
-      "acc": 0.49,
-      "n": 51,
-      "live_n": 51,
-      "r": 0.1244,
-      "t": 0.88,
-      "live_acc": 0.49,
-      "weight": 0.98
+      "acc": 0.476,
+      "n": 63,
+      "live_n": 63,
+      "r": -0.0401,
+      "t": -0.31,
+      "live_acc": 0.476,
+      "weight": 0.0
     },
     "us_index": {
       "acc": 0.621,
-      "n": 14382,
-      "live_n": 51,
-      "r": 0.2975,
-      "t": 37.37,
-      "live_acc": 0.529,
+      "n": 14394,
+      "live_n": 63,
+      "r": 0.2976,
+      "t": 37.39,
+      "live_acc": 0.54,
       "weight": 1.48
     },
     "nvda": {
       "acc": 0.608,
-      "n": 10944,
-      "live_n": 19,
+      "n": 10954,
+      "live_n": 29,
       "r": 0.2534,
-      "t": 27.4,
-      "live_acc": 0.421,
+      "t": 27.41,
+      "live_acc": 0.448,
       "weight": 1.43
     },
     "vix": {
@@ -76,22 +76,22 @@
       "weight": 1.42
     },
     "foreign": {
-      "acc": 0.413,
-      "n": 46,
-      "live_n": 46,
-      "r": -0.1472,
-      "t": -0.99,
-      "live_acc": 0.413,
-      "weight": 0.81
+      "acc": 0.397,
+      "n": 58,
+      "live_n": 58,
+      "r": -0.1522,
+      "t": -1.15,
+      "live_acc": 0.397,
+      "weight": 0.76
     },
     "trust": {
-      "acc": 0.6,
-      "n": 25,
-      "live_n": 25,
-      "r": 0.1564,
-      "t": 0.76,
-      "live_acc": 0.6,
-      "weight": 1.15
+      "acc": 0.533,
+      "n": 30,
+      "live_n": 30,
+      "r": -0.016,
+      "t": -0.08,
+      "live_acc": 0.533,
+      "weight": 1.06
     },
     "margin": {
       "acc": 0.6,
@@ -103,13 +103,13 @@
       "weight": 1.04
     },
     "fut_oi": {
-      "acc": 0.549,
-      "n": 51,
-      "live_n": 51,
+      "acc": 0.524,
+      "n": 63,
+      "live_n": 63,
       "r": 0.0,
       "t": 0.0,
-      "live_acc": 0.549,
-      "weight": 1.11
+      "live_acc": 0.524,
+      "weight": 0.0
     },
     "news_market": {
       "acc": 0.471,
@@ -121,40 +121,40 @@
       "weight": 0.93
     },
     "news_stock": {
-      "acc": 0.412,
-      "n": 34,
-      "live_n": 34,
-      "r": -0.041,
-      "t": -0.23,
-      "live_acc": 0.412,
-      "weight": 0.84
+      "acc": 0.465,
+      "n": 43,
+      "live_n": 43,
+      "r": 0.016,
+      "t": 0.1,
+      "live_acc": 0.465,
+      "weight": 0.93
     },
     "revenue": {
-      "acc": 0.481,
-      "n": 27,
-      "live_n": 27,
+      "acc": 0.471,
+      "n": 34,
+      "live_n": 34,
       "r": 0.0,
       "t": 0.0,
-      "live_acc": 0.481,
-      "weight": 0.97
+      "live_acc": 0.471,
+      "weight": 0.95
     },
     "holders": {
-      "acc": 0.667,
-      "n": 15,
-      "live_n": 15,
-      "r": 0.1812,
+      "acc": 0.65,
+      "n": 20,
+      "live_n": 20,
+      "r": 0.1526,
       "t": 0.66,
-      "live_acc": 0.667,
-      "weight": 1.18
+      "live_acc": 0.65,
+      "weight": 1.2
     },
     "sbl": {
-      "acc": 0.571,
-      "n": 7,
-      "live_n": 7,
-      "r": 0.4943,
-      "t": 1.27,
-      "live_acc": 0.571,
-      "weight": 1.04
+      "acc": 0.444,
+      "n": 9,
+      "live_n": 9,
+      "r": -0.2055,
+      "t": -0.56,
+      "live_acc": 0.444,
+      "weight": 0.96
     },
     "put_call": {
       "acc": 0.538,
@@ -168,46 +168,49 @@
   },
   "previous_factors": {
     "adr": 1.41,
-    "night": 1.0,
+    "night": 0.98,
     "us_index": 1.48,
     "nvda": 1.43,
     "vix": 1.81,
-    "limit": 1.44,
-    "foreign": 0.87,
-    "trust": 1.07,
-    "margin": 1.0,
-    "fut_oi": 1.1,
-    "news_market": 0.9,
-    "news_stock": 0.91,
-    "revenue": 0.87,
-    "holders": 1.16,
-    "sbl": 1.0,
+    "limit": 1.42,
+    "foreign": 0.81,
+    "trust": 1.15,
+    "margin": 1.04,
+    "fut_oi": 1.11,
+    "news_market": 0.93,
+    "news_stock": 0.84,
+    "revenue": 0.97,
+    "holders": 1.18,
+    "sbl": 1.04,
     "put_call": 1.06
   },
-  "previous_scale": 1.0,
-  "removed": {},
+  "previous_scale": 0.2,
+  "removed": {
+    "night": "63 筆驗證不顯著（r=-0.040, t=-0.3）",
+    "fut_oi": "63 筆驗證不顯著（r=+0.000, t=+0.0）"
+  },
   "week_removed": {},
   "week_factors": {
-    "carry": 0.96,
-    "flows": 0.88,
+    "carry": 0.91,
+    "flows": 0.85,
     "reversal": 1.0,
     "bollinger": 1.0,
-    "sentiment": 1.04
+    "sentiment": 1.0
   },
   "week_factor_stats": {
     "carry": {
-      "acc": 0.444,
-      "n": 9,
-      "r": -0.1929,
-      "t": -0.23,
-      "weight": 0.96
+      "acc": 0.44,
+      "n": 25,
+      "r": -0.1363,
+      "t": -0.3,
+      "weight": 0.91
     },
     "flows": {
-      "acc": 0.333,
-      "n": 9,
-      "r": -0.0093,
-      "t": -0.01,
-      "weight": 0.88
+      "acc": 0.4,
+      "n": 25,
+      "r": 0.1148,
+      "t": 0.25,
+      "weight": 0.85
     },
     "reversal": {
       "acc": null,
@@ -220,19 +223,19 @@
       "weight": 1.0
     },
     "sentiment": {
-      "acc": 0.556,
-      "n": 9,
+      "acc": 0.5,
+      "n": 12,
       "r": 0.0,
       "t": 0.0,
-      "weight": 1.04
+      "weight": 1.0
     }
   },
-  "week_samples": 10,
+  "week_samples": 26,
   "previous_week_factors": {
-    "carry": 1.0,
-    "flows": 1.0,
+    "carry": 0.96,
+    "flows": 0.88,
     "reversal": 1.0,
     "bollinger": 1.0,
-    "sentiment": 1.0
+    "sentiment": 1.04
   }
 }
