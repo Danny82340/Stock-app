@@ -18,7 +18,7 @@
     "put_call": 1.06
   },
   "scale": 0.5,
-  "updated": "2026-10-12",
+  "updated": "2026-10-13",
   "samples": 130,
   "factor_stats": {
     "adr": {
@@ -174,17 +174,17 @@
     "vix": 1.81,
     "limit": 1.42,
     "foreign": 0.0,
-    "trust": 1.05,
-    "margin": 1.08,
+    "trust": 1.0,
+    "margin": 1.04,
     "fut_oi": 0.0,
     "news_market": 0.0,
     "news_stock": 0.0,
     "revenue": 0.0,
-    "holders": 1.13,
-    "sbl": 0.93,
+    "holders": 1.12,
+    "sbl": 1.03,
     "put_call": 1.06
   },
-  "previous_scale": 0.85,
+  "previous_scale": 0.5,
   "removed": {
     "night": "126 筆驗證不顯著（r=-0.014, t=-0.2）",
     "foreign": "113 筆驗證不顯著（r=-0.034, t=-0.4）",
@@ -194,8 +194,8 @@
     "revenue": "67 筆驗證不顯著（r=+0.000, t=+0.0）"
   },
   "week_removed": {
-    "carry": "77 筆實盤驗證不顯著（r=-0.090, t=-0.3）",
-    "flows": "76 筆實盤驗證不顯著（r=+0.031, t=+0.1）"
+    "carry": "78 筆實盤驗證不顯著（r=-0.109, t=-0.4）",
+    "flows": "77 筆實盤驗證不顯著（r=+0.042, t=+0.2）"
   },
   "week_factors": {
     "carry": 0.0,
@@ -206,17 +206,17 @@
   },
   "week_factor_stats": {
     "carry": {
-      "acc": 0.481,
-      "n": 77,
-      "r": -0.09,
-      "t": -0.35,
+      "acc": 0.474,
+      "n": 78,
+      "r": -0.1087,
+      "t": -0.43,
       "weight": 0.0
     },
     "flows": {
-      "acc": 0.329,
-      "n": 76,
-      "r": 0.0309,
-      "t": 0.12,
+      "acc": 0.338,
+      "n": 77,
+      "r": 0.0425,
+      "t": 0.16,
       "weight": 0.0
     },
     "reversal": {
@@ -237,7 +237,7 @@
       "weight": 0.66
     }
   },
-  "week_samples": 78,
+  "week_samples": 79,
   "previous_week_factors": {
     "carry": 0.0,
     "flows": 0.0,
