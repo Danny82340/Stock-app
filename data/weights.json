@@ -1,6 +1,173 @@
 {
   "factors": {
     "adr": 1.41,
+    "night": 1.14,
+    "us_index": 1.48,
+    "nvda": 1.43,
+    "vix": 1.82,
+    "limit": 1.41,
+    "foreign": 0.0,
+    "trust": 0.0,
+    "margin": 1.19,
+    "fut_oi": 0.0,
+    "news_market": 1.31,
+    "news_stock": 0.0,
+    "revenue": 0.0,
+    "holders": 0.0,
+    "sbl": 0.97,
+    "put_call": 0.0
+  },
+  "scale": 1.1,
+  "updated": "2026-10-19",
+  "samples": 182,
+  "factor_stats": {
+    "adr": {
+      "acc": 0.604,
+      "n": 14467,
+      "live_n": 150,
+      "r": 0.2683,
+      "t": 33.5,
+      "live_acc": 0.653,
+      "weight": 1.41
+    },
+    "night": {
+      "acc": 0.543,
+      "n": 175,
+      "live_n": 175,
+      "r": 0.1703,
+      "t": 2.27,
+      "live_acc": 0.543,
+      "weight": 1.14
+    },
+    "us_index": {
+      "acc": 0.621,
+      "n": 14506,
+      "live_n": 175,
+      "r": 0.2987,
+      "t": 37.69,
+      "live_acc": 0.594,
+      "weight": 1.48
+    },
+    "nvda": {
+      "acc": 0.608,
+      "n": 11038,
+      "live_n": 113,
+      "r": 0.2538,
+      "t": 27.57,
+      "live_acc": 0.602,
+      "weight": 1.43
+    },
+    "vix": {
+      "acc": 0.708,
+      "n": 2518,
+      "live_n": 13,
+      "r": 0.3645,
+      "t": 19.63,
+      "live_acc": 1.0,
+      "weight": 1.82
+    },
+    "limit": {
+      "acc": 0.619,
+      "n": 257,
+      "live_n": 7,
+      "r": 0.2742,
+      "t": 4.55,
+      "live_acc": 0.286,
+      "weight": 1.41
+    },
+    "foreign": {
+      "acc": 0.436,
+      "n": 156,
+      "live_n": 156,
+      "r": -0.1539,
+      "t": -1.93,
+      "live_acc": 0.436,
+      "weight": 0.0
+    },
+    "trust": {
+      "acc": 0.426,
+      "n": 68,
+      "live_n": 68,
+      "r": -0.0153,
+      "t": -0.12,
+      "live_acc": 0.426,
+      "weight": 0.0
+    },
+    "margin": {
+      "acc": 0.636,
+      "n": 22,
+      "live_n": 22,
+      "r": 0.4939,
+      "t": 2.54,
+      "live_acc": 0.636,
+      "weight": 1.19
+    },
+    "fut_oi": {
+      "acc": 0.513,
+      "n": 150,
+      "live_n": 150,
+      "r": 0.0,
+      "t": 0.0,
+      "live_acc": 0.513,
+      "weight": 0.0
+    },
+    "news_market": {
+      "acc": 0.595,
+      "n": 163,
+      "live_n": 163,
+      "r": 0.313,
+      "t": 4.18,
+      "live_acc": 0.595,
+      "weight": 1.31
+    },
+    "news_stock": {
+      "acc": 0.472,
+      "n": 125,
+      "live_n": 125,
+      "r": -0.0135,
+      "t": -0.15,
+      "live_acc": 0.472,
+      "weight": 0.0
+    },
+    "revenue": {
+      "acc": 0.473,
+      "n": 91,
+      "live_n": 91,
+      "r": -0.3146,
+      "t": -3.13,
+      "live_acc": 0.473,
+      "weight": 0.0
+    },
+    "holders": {
+      "acc": 0.537,
+      "n": 67,
+      "live_n": 67,
+      "r": 0.1218,
+      "t": 0.99,
+      "live_acc": 0.537,
+      "weight": 0.0
+    },
+    "sbl": {
+      "acc": 0.483,
+      "n": 29,
+      "live_n": 29,
+      "r": -0.2044,
+      "t": -1.08,
+      "live_acc": 0.483,
+      "weight": 0.97
+    },
+    "put_call": {
+      "acc": 0.532,
+      "n": 62,
+      "live_n": 62,
+      "r": 0.0,
+      "t": 0.0,
+      "live_acc": 0.532,
+      "weight": 0.0
+    }
+  },
+  "previous_factors": {
+    "adr": 1.41,
     "night": 0.0,
     "us_index": 1.48,
     "nvda": 1.43,
@@ -17,182 +184,15 @@
     "sbl": 0.94,
     "put_call": 1.14
   },
-  "scale": 1.0,
-  "updated": "2026-10-16",
-  "samples": 166,
-  "factor_stats": {
-    "adr": {
-      "acc": 0.604,
-      "n": 14451,
-      "live_n": 134,
-      "r": 0.2683,
-      "t": 33.48,
-      "live_acc": 0.679,
-      "weight": 1.41
-    },
-    "night": {
-      "acc": 0.522,
-      "n": 159,
-      "live_n": 159,
-      "r": 0.1375,
-      "t": 1.74,
-      "live_acc": 0.522,
-      "weight": 0.0
-    },
-    "us_index": {
-      "acc": 0.621,
-      "n": 14490,
-      "live_n": 159,
-      "r": 0.2987,
-      "t": 37.67,
-      "live_acc": 0.591,
-      "weight": 1.48
-    },
-    "nvda": {
-      "acc": 0.608,
-      "n": 11027,
-      "live_n": 102,
-      "r": 0.254,
-      "t": 27.57,
-      "live_acc": 0.618,
-      "weight": 1.43
-    },
-    "vix": {
-      "acc": 0.708,
-      "n": 2515,
-      "live_n": 10,
-      "r": 0.3642,
-      "t": 19.6,
-      "live_acc": 1.0,
-      "weight": 1.82
-    },
-    "limit": {
-      "acc": 0.618,
-      "n": 254,
-      "live_n": 4,
-      "r": 0.2749,
-      "t": 4.54,
-      "live_acc": 0.0,
-      "weight": 1.41
-    },
-    "foreign": {
-      "acc": 0.444,
-      "n": 142,
-      "live_n": 142,
-      "r": -0.1482,
-      "t": -1.77,
-      "live_acc": 0.444,
-      "weight": 0.0
-    },
-    "trust": {
-      "acc": 0.45,
-      "n": 60,
-      "live_n": 60,
-      "r": 0.0073,
-      "t": 0.06,
-      "live_acc": 0.45,
-      "weight": 0.0
-    },
-    "margin": {
-      "acc": 0.611,
-      "n": 18,
-      "live_n": 18,
-      "r": 0.477,
-      "t": 2.17,
-      "live_acc": 0.611,
-      "weight": 1.14
-    },
-    "fut_oi": {
-      "acc": 0.522,
-      "n": 134,
-      "live_n": 134,
-      "r": 0.0,
-      "t": 0.0,
-      "live_acc": 0.522,
-      "weight": 0.0
-    },
-    "news_market": {
-      "acc": 0.578,
-      "n": 147,
-      "live_n": 147,
-      "r": 0.2945,
-      "t": 3.71,
-      "live_acc": 0.578,
-      "weight": 1.25
-    },
-    "news_stock": {
-      "acc": 0.461,
-      "n": 115,
-      "live_n": 115,
-      "r": 0.0042,
-      "t": 0.04,
-      "live_acc": 0.461,
-      "weight": 0.0
-    },
-    "revenue": {
-      "acc": 0.464,
-      "n": 84,
-      "live_n": 84,
-      "r": -0.431,
-      "t": -4.33,
-      "live_acc": 0.464,
-      "weight": 0.0
-    },
-    "holders": {
-      "acc": 0.574,
-      "n": 61,
-      "live_n": 61,
-      "r": 0.1757,
-      "t": 1.37,
-      "live_acc": 0.574,
-      "weight": 0.0
-    },
-    "sbl": {
-      "acc": 0.462,
-      "n": 26,
-      "live_n": 26,
-      "r": -0.2081,
-      "t": -1.04,
-      "live_acc": 0.462,
-      "weight": 0.94
-    },
-    "put_call": {
-      "acc": 0.565,
-      "n": 46,
-      "live_n": 46,
-      "r": 0.0,
-      "t": 0.0,
-      "live_acc": 0.565,
-      "weight": 1.14
-    }
-  },
-  "previous_factors": {
-    "adr": 1.41,
-    "night": 0.0,
-    "us_index": 1.48,
-    "nvda": 1.43,
-    "vix": 1.81,
-    "limit": 1.41,
-    "foreign": 0.0,
-    "trust": 0.89,
-    "margin": 1.11,
-    "fut_oi": 0.0,
-    "news_market": 0.0,
-    "news_stock": 0.0,
-    "revenue": 0.0,
-    "holders": 1.11,
-    "sbl": 0.97,
-    "put_call": 0.97
-  },
-  "previous_scale": 0.75,
+  "previous_scale": 1.0,
   "removed": {
-    "night": "159 筆驗證不顯著（r=+0.137, t=+1.7）",
-    "foreign": "142 筆驗證不顯著（r=-0.148, t=-1.8）",
-    "trust": "60 筆驗證不顯著（r=+0.007, t=+0.1）",
-    "fut_oi": "134 筆驗證不顯著（r=+0.000, t=+0.0）",
-    "news_stock": "115 筆驗證不顯著（r=+0.004, t=+0.0）",
-    "revenue": "84 筆驗證不顯著（r=-0.431, t=-4.3）",
-    "holders": "61 筆驗證不顯著（r=+0.176, t=+1.4）"
+    "foreign": "156 筆驗證不顯著（r=-0.154, t=-1.9）",
+    "trust": "68 筆驗證不顯著（r=-0.015, t=-0.1）",
+    "fut_oi": "150 筆驗證不顯著（r=+0.000, t=+0.0）",
+    "news_stock": "125 筆驗證不顯著（r=-0.013, t=-0.1）",
+    "revenue": "91 筆驗證不顯著（r=-0.315, t=-3.1）",
+    "holders": "67 筆驗證不顯著（r=+0.122, t=+1.0）",
+    "put_call": "62 筆驗證不顯著（r=+0.000, t=+0.0）"
   },
   "week_removed": {
     "carry": "103 筆實盤驗證不顯著（r=-0.187, t=-0.9）",
@@ -238,7 +238,7 @@
       "weight": 0.66
     }
   },
-  "week_samples": 114,
+  "week_samples": 130,
   "previous_week_factors": {
     "carry": 0.0,
     "flows": 0.0,
