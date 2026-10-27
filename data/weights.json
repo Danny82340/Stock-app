@@ -1,6 +1,6 @@
 {
   "factors": {
-    "adr": 1.41,
+    "adr": 1.42,
     "night": 1.08,
     "us_index": 1.48,
     "nvda": 1.43,
@@ -8,9 +8,9 @@
     "limit": 1.41,
     "foreign": 0.0,
     "trust": 0.0,
-    "margin": 1.28,
+    "margin": 1.27,
     "fut_oi": 0.0,
-    "news_market": 1.4,
+    "news_market": 1.32,
     "news_stock": 0.0,
     "revenue": 0.0,
     "holders": 0.0,
@@ -18,17 +18,17 @@
     "put_call": 0.0
   },
   "scale": 1.45,
-  "updated": "2026-10-26",
-  "samples": 234,
+  "updated": "2026-10-27",
+  "samples": 247,
   "factor_stats": {
     "adr": {
       "acc": 0.604,
-      "n": 14504,
-      "live_n": 187,
-      "r": 0.268,
-      "t": 33.5,
-      "live_acc": 0.668,
-      "weight": 1.41
+      "n": 14517,
+      "live_n": 200,
+      "r": 0.2681,
+      "t": 33.52,
+      "live_acc": 0.675,
+      "weight": 1.42
     },
     "night": {
       "acc": 0.523,
@@ -41,20 +41,20 @@
     },
     "us_index": {
       "acc": 0.621,
-      "n": 14543,
-      "live_n": 212,
+      "n": 14556,
+      "live_n": 225,
       "r": 0.2982,
-      "t": 37.67,
-      "live_acc": 0.571,
+      "t": 37.68,
+      "live_acc": 0.578,
       "weight": 1.48
     },
     "nvda": {
-      "acc": 0.608,
-      "n": 11066,
-      "live_n": 141,
-      "r": 0.2534,
+      "acc": 0.607,
+      "n": 11076,
+      "live_n": 151,
+      "r": 0.2533,
       "t": 27.55,
-      "live_acc": 0.553,
+      "live_acc": 0.53,
       "weight": 1.43
     },
     "vix": {
@@ -94,57 +94,57 @@
       "weight": 0.0
     },
     "margin": {
-      "acc": 0.68,
-      "n": 25,
-      "live_n": 25,
-      "r": 0.5259,
-      "t": 2.97,
-      "live_acc": 0.68,
-      "weight": 1.28
+      "acc": 0.667,
+      "n": 27,
+      "live_n": 27,
+      "r": 0.4853,
+      "t": 2.78,
+      "live_acc": 0.667,
+      "weight": 1.27
     },
     "fut_oi": {
-      "acc": 0.503,
-      "n": 187,
-      "live_n": 187,
+      "acc": 0.485,
+      "n": 200,
+      "live_n": 200,
       "r": 0.0,
       "t": 0.0,
-      "live_acc": 0.503,
+      "live_acc": 0.485,
       "weight": 0.0
     },
     "news_market": {
-      "acc": 0.62,
-      "n": 200,
-      "live_n": 200,
-      "r": 0.3179,
-      "t": 4.72,
-      "live_acc": 0.62,
-      "weight": 1.4
+      "acc": 0.596,
+      "n": 213,
+      "live_n": 213,
+      "r": 0.2654,
+      "t": 4.0,
+      "live_acc": 0.596,
+      "weight": 1.32
     },
     "news_stock": {
-      "acc": 0.5,
-      "n": 154,
-      "live_n": 154,
-      "r": -0.0167,
-      "t": -0.21,
-      "live_acc": 0.5,
+      "acc": 0.506,
+      "n": 164,
+      "live_n": 164,
+      "r": -0.0117,
+      "t": -0.15,
+      "live_acc": 0.506,
       "weight": 0.0
     },
     "revenue": {
-      "acc": 0.491,
-      "n": 110,
-      "live_n": 110,
-      "r": -0.1937,
-      "t": -2.05,
-      "live_acc": 0.491,
+      "acc": 0.513,
+      "n": 117,
+      "live_n": 117,
+      "r": -0.2091,
+      "t": -2.29,
+      "live_acc": 0.513,
       "weight": 0.0
     },
     "holders": {
-      "acc": 0.506,
-      "n": 87,
-      "live_n": 87,
-      "r": 0.0772,
-      "t": 0.71,
-      "live_acc": 0.506,
+      "acc": 0.522,
+      "n": 92,
+      "live_n": 92,
+      "r": 0.0802,
+      "t": 0.76,
+      "live_acc": 0.522,
       "weight": 0.0
     },
     "sbl": {
@@ -184,20 +184,20 @@
     "sbl": 1.03,
     "put_call": 0.0
   },
-  "previous_scale": 1.15,
+  "previous_scale": 1.45,
   "removed": {
     "foreign": "191 筆驗證不顯著（r=-0.164, t=-2.3）",
     "trust": "89 筆驗證不顯著（r=+0.017, t=+0.2）",
-    "fut_oi": "187 筆驗證不顯著（r=+0.000, t=+0.0）",
-    "news_stock": "154 筆驗證不顯著（r=-0.017, t=-0.2）",
-    "revenue": "110 筆驗證不顯著（r=-0.194, t=-2.1）",
-    "holders": "87 筆驗證不顯著（r=+0.077, t=+0.7）",
+    "fut_oi": "200 筆驗證不顯著（r=+0.000, t=+0.0）",
+    "news_stock": "164 筆驗證不顯著（r=-0.012, t=-0.1）",
+    "revenue": "117 筆驗證不顯著（r=-0.209, t=-2.3）",
+    "holders": "92 筆驗證不顯著（r=+0.080, t=+0.8）",
     "put_call": "99 筆驗證不顯著（r=+0.000, t=+0.0）"
   },
   "week_removed": {
     "carry": "103 筆實盤驗證不顯著（r=-0.187, t=-0.9）",
     "flows": "101 筆實盤驗證不顯著（r=+0.018, t=+0.1）",
-    "sentiment": "76 筆實盤驗證不顯著（r=+0.000, t=+0.0）"
+    "sentiment": "89 筆實盤驗證不顯著（r=+0.000, t=+0.0）"
   },
   "week_factors": {
     "carry": 0.0,
@@ -232,14 +232,14 @@
       "weight": 1.0
     },
     "sentiment": {
-      "acc": 0.592,
-      "n": 76,
+      "acc": 0.584,
+      "n": 89,
       "r": 0.0,
       "t": 0.0,
       "weight": 0.0
     }
   },
-  "week_samples": 195,
+  "week_samples": 208,
   "previous_week_factors": {
     "carry": 0.0,
     "flows": 0.0,
