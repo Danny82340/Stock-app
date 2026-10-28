@@ -18,7 +18,7 @@
     "put_call": 0.0
   },
   "scale": 1.45,
-  "updated": "2026-10-27",
+  "updated": "2026-10-28",
   "samples": 247,
   "factor_stats": {
     "adr": {
@@ -167,7 +167,7 @@
     }
   },
   "previous_factors": {
-    "adr": 1.41,
+    "adr": 1.42,
     "night": 1.08,
     "us_index": 1.48,
     "nvda": 1.43,
@@ -175,9 +175,9 @@
     "limit": 1.41,
     "foreign": 0.0,
     "trust": 0.0,
-    "margin": 1.28,
+    "margin": 1.27,
     "fut_oi": 0.0,
-    "news_market": 1.4,
+    "news_market": 1.32,
     "news_stock": 0.0,
     "revenue": 0.0,
     "holders": 0.0,
@@ -197,7 +197,7 @@
   "week_removed": {
     "carry": "103 筆實盤驗證不顯著（r=-0.187, t=-0.9）",
     "flows": "101 筆實盤驗證不顯著（r=+0.018, t=+0.1）",
-    "sentiment": "89 筆實盤驗證不顯著（r=+0.000, t=+0.0）"
+    "sentiment": "99 筆實盤驗證不顯著（r=+0.000, t=+0.0）"
   },
   "week_factors": {
     "carry": 0.0,
@@ -232,14 +232,14 @@
       "weight": 1.0
     },
     "sentiment": {
-      "acc": 0.584,
-      "n": 89,
+      "acc": 0.556,
+      "n": 99,
       "r": 0.0,
       "t": 0.0,
       "weight": 0.0
     }
   },
-  "week_samples": 208,
+  "week_samples": 218,
   "previous_week_factors": {
     "carry": 0.0,
     "flows": 0.0,
