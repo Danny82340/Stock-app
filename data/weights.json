@@ -18,7 +18,7 @@
     "put_call": 0.0
   },
   "scale": 1.1,
-  "updated": "2026-11-19",
+  "updated": "2026-11-20",
   "samples": 455,
   "factor_stats": {
     "adr": {
@@ -171,7 +171,7 @@
     "night": 0.0,
     "us_index": 1.48,
     "nvda": 1.43,
-    "vix": 1.81,
+    "vix": 1.8,
     "limit": 1.41,
     "foreign": 0.0,
     "trust": 0.0,
@@ -184,7 +184,7 @@
     "sbl": 1.09,
     "put_call": 0.0
   },
-  "previous_scale": 1.2,
+  "previous_scale": 1.1,
   "removed": {
     "night": "392 筆驗證不顯著（r=-0.138, t=-2.8）",
     "foreign": "383 筆驗證不顯著（r=-0.095, t=-1.9）",
@@ -240,7 +240,7 @@
       "weight": 0.0
     }
   },
-  "week_samples": 413,
+  "week_samples": 426,
   "previous_week_factors": {
     "carry": 0.0,
     "flows": 0.0,
